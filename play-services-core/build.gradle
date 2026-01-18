@@ -224,3 +224,8 @@ android.applicationVariants.all { variant ->
         output.outputFileName = variant.applicationId + "-" + variant.versionCode + variant.versionName.substring(version.length()) + ".apk"
     }
 }
+
+// Enable deprecation and unchecked warnings for Java compilation
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ["-Xlint:deprecation", "-Xlint:unchecked"]
+}
