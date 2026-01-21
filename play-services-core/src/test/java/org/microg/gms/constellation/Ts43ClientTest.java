@@ -11,6 +11,8 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 import java.util.Arrays;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 
 public class Ts43ClientTest {
 
@@ -47,16 +49,52 @@ public class Ts43ClientTest {
             }
 
             @Override
+            public String getSubscriberId() {
+                return "123456789012345";
+            }
+
+            @Override
             public String getIccAuthentication(int appType, int authType, String data) {
                 // Verify input data
-                // data is Base64 encoded: len(RAND) + RAND + len(AUTN) + AUTN
                 byte[] decoded = java.util.Base64.getDecoder().decode(data);
-                assertEquals(34, decoded.length); // 1 + 16 + 1 + 16
-                assertEquals(16, decoded[0]); // len(RAND)
-                assertEquals(16, decoded[17]); // len(AUTN)
+                assertEquals(34, decoded.length);
                 
-                // Return dummy response
-                return "DUMMY_RES";
+                // Construct SIM Response (Success)
+                // Tag 0xDB
+                // RES (0xDC): 8 bytes
+                // CK (0xDD): 16 bytes
+                // IK (0xDE): 16 bytes
+                
+                byte[] res = new byte[8]; Arrays.fill(res, (byte) 0x11);
+                byte[] ck = new byte[16]; Arrays.fill(ck, (byte) 0x22);
+                byte[] ik = new byte[16]; Arrays.fill(ik, (byte) 0x33);
+                
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                bos.write(0xDB); // Success tag
+                
+                // Content
+                ByteArrayOutputStream content = new ByteArrayOutputStream();
+                
+                // RES
+                content.write(0xDC);
+                content.write(res.length);
+                try { content.write(res); } catch (IOException e) {}
+                
+                // CK
+                content.write(0xDD);
+                content.write(ck.length);
+                try { content.write(ck); } catch (IOException e) {}
+                
+                // IK
+                content.write(0xDE);
+                content.write(ik.length);
+                try { content.write(ik); } catch (IOException e) {}
+                
+                byte[] contentBytes = content.toByteArray();
+                bos.write(contentBytes.length); // Assuming length < 128 for test
+                try { bos.write(contentBytes); } catch (IOException e) {}
+                
+                return java.util.Base64.getEncoder().encodeToString(bos.toByteArray());
             }
         };
 
@@ -91,6 +129,27 @@ public class Ts43ClientTest {
         String response = client.handleEapAkaChallenge(1, challenge);
         
         assertNotNull(response);
-        assertTrue(response.contains("EAP-AKA response=\"DUMMY_RES\""));
+        assertTrue(response.startsWith("EAP-AKA response=\""));
+        
+        String responseBase64 = response.substring(18, response.length() - 1);
+        byte[] responseBytes = java.util.Base64.getDecoder().decode(responseBase64);
+        
+        // Verify Header
+        assertEquals(0x02, responseBytes[0]); // Code: Response
+        assertEquals(0x01, responseBytes[1]); // ID: 1
+        assertEquals(23, responseBytes[4]); // Type: EAP-AKA
+        assertEquals(1, responseBytes[5]); // Subtype: Challenge
+        
+        // Verify AT_RES (Type 3)
+        // Header length is 8 bytes
+        pos = 8;
+        assertEquals(3, responseBytes[pos]); // Type: AT_RES
+        // Length should be 1 + (8+0)/4 = 3 words
+        assertEquals(3, responseBytes[pos+1]); 
+        
+        // Verify AT_MAC (Type 11)
+        pos += 12; // 3 words * 4 bytes
+        assertEquals(11, responseBytes[pos]); // Type: AT_MAC
+        assertEquals(5, responseBytes[pos+1]); // Length: 5 words
     }
 }

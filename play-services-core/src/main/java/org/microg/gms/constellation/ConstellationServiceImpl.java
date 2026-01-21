@@ -9,6 +9,9 @@ import android.content.Context;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.RemoteException;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyManager;
 import android.util.Log;
 
 import com.google.android.gms.common.api.ApiMetadata;
@@ -43,11 +46,11 @@ import java.util.List;
  * - This means even stub responses can help Messages progress past "Setting up..."
  *
  * AIDL Interface (microG Stub mapping, decompiled from system APK):
- * - Code 3: verifyPhoneNumberV1 (Bundle-based, legacy)
- * - Code 4: verifyPhoneNumberSingleUse (Bundle-based, legacy)
- * - Code 5: verifyPhoneNumber (VerifyPhoneNumberRequest, current)
- * - Code 6: getIidToken
- * - Code 7: getPnvCapabilities
+ * - Code 1: verifyPhoneNumberV1 (Bundle-based, legacy)
+ * - Code 2: verifyPhoneNumberSingleUse (Bundle-based, legacy)
+ * - Code 3: verifyPhoneNumber (VerifyPhoneNumberRequest, current)
+ * - Code 4: getIidToken
+ * - Code 5: getPnvCapabilities
  */
 public class ConstellationServiceImpl extends IConstellationApiService.Stub {
     private static final String TAG = "GmsConstellationSvcImpl";
@@ -67,9 +70,88 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
      */
     @Override
     public void verifyPhoneNumberV1(IConstellationCallbacks callbacks, Bundle bundle, ApiMetadata metadata) throws RemoteException {
-        Log.w(TAG, "verifyPhoneNumberV1() called - redirecting to verifyPhoneNumber() for testing");
-        VerifyPhoneNumberRequest request = bundleToVerifyRequest(bundle);
+        Log.w(TAG, "verifyPhoneNumberV1() called with Bundle");
+        Log.d(TAG, "  Bundle contents: " + bundleToString(bundle));
+        
+        // Extract phone number from Bundle - try various key names
+        String phoneNumber = null;
+        int subId = -1;
+        if (bundle != null) {
+            phoneNumber = bundle.getString("phone_number");
+            if (phoneNumber == null) phoneNumber = bundle.getString("phoneNumber");
+            if (phoneNumber == null) phoneNumber = bundle.getString("msisdn");
+            if (phoneNumber == null) phoneNumber = bundle.getString("number");
+            
+            subId = bundle.getInt("subscription_id", bundle.getInt("subscriptionId", bundle.getInt("sub_id", -1)));
+            if (subId == -1) {
+                subId = (int) bundle.getLong("subscription_id", bundle.getLong("subscriptionId", bundle.getLong("sub_id", -1L)));
+            }
+        }
+        
+        // If phone number not in Bundle, get from TelephonyManager
+        if (phoneNumber == null || phoneNumber.isEmpty()) {
+            phoneNumber = getPhoneNumberFromSim(subId);
+            Log.d(TAG, "  Phone number from SIM: " + phoneNumber);
+        }
+        
+        Log.d(TAG, "  Extracted phoneNumber: " + phoneNumber + ", subId: " + subId);
+        
+        // Call verifyPhoneNumber with extracted data
+            VerifyPhoneNumberRequest request = new VerifyPhoneNumberRequest(
+            phoneNumber,
+            subId,
+            null,  // idTokenRequest
+            bundle != null ? bundle : new Bundle(),
+            null,  // imsiRequests
+            true,  // allowFallback
+            PhoneNumberVerification.METHOD_TS43,
+            null   // verificationCapabilities
+        );
         verifyPhoneNumber(callbacks, request, metadata);
+    }
+    
+    /**
+     * Get phone number from SIM via TelephonyManager.
+     */
+    private String getPhoneNumberFromSim(int subId) {
+        try {
+            TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+            if (tm == null) return null;
+            
+            // If specific subId, try to get that SIM's number
+            if (subId > 0) {
+                TelephonyManager tmSub = tm.createForSubscriptionId(subId);
+                String number = tmSub.getLine1Number();
+                if (number != null && !number.isEmpty()) {
+                    return number;
+                }
+            }
+            
+            // Fallback to default SIM
+            String number = tm.getLine1Number();
+            if (number != null && !number.isEmpty()) {
+                return number;
+            }
+            
+            // Try SubscriptionManager
+            SubscriptionManager sm = (SubscriptionManager) context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
+            if (sm != null) {
+                List<SubscriptionInfo> subs = sm.getActiveSubscriptionInfoList();
+                if (subs != null && !subs.isEmpty()) {
+                    for (SubscriptionInfo sub : subs) {
+                        String subNumber = sub.getNumber();
+                        if (subNumber != null && !subNumber.isEmpty()) {
+                            return subNumber;
+                        }
+                    }
+                }
+            }
+        } catch (SecurityException e) {
+            Log.w(TAG, "No permission to read phone number: " + e.getMessage());
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to get phone number from SIM: " + e.getMessage());
+        }
+        return null;
     }
 
     /**
@@ -77,9 +159,10 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
      */
     @Override
     public void verifyPhoneNumberSingleUse(IConstellationCallbacks callbacks, Bundle bundle, ApiMetadata metadata) throws RemoteException {
-        Log.w(TAG, "verifyPhoneNumberSingleUse() called - redirecting to verifyPhoneNumber() for testing");
-        VerifyPhoneNumberRequest request = bundleToVerifyRequest(bundle);
-        verifyPhoneNumber(callbacks, request, metadata);
+        Log.w(TAG, "verifyPhoneNumberSingleUse() called with Bundle");
+        Log.d(TAG, "  Bundle contents: " + bundleToString(bundle));
+        // Reuse the same logic as V1
+        verifyPhoneNumberV1(callbacks, bundle, metadata);
     }
 
     /**
@@ -96,7 +179,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             Log.d(TAG, "  subscriptionId: " + request.subscriptionId);
             Log.d(TAG, "  allowFallback: " + request.allowFallback);
             Log.d(TAG, "  verificationType: " + request.verificationType);
-            Log.d(TAG, "  simCapabilities: " + request.simCapabilities);
+            Log.d(TAG, "  imsiRequests: " + request.imsiRequests);
             Log.d(TAG, "  verificationCapabilities: " + request.verificationCapabilities);
             Log.d(TAG, "  extras: " + bundleToString(request.extras));
             if (request.idTokenRequest != null) {
@@ -109,10 +192,18 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             String phoneNumber = request != null ? request.phoneNumber : null;
             int subId = request != null ? (int) request.subscriptionId : -1;
             
+            // If phone number is null, try to get from SIM
+            if (phoneNumber == null || phoneNumber.isEmpty()) {
+                phoneNumber = getPhoneNumberFromSim(subId);
+                Log.d(TAG, "  Phone number from SIM (fallback): " + phoneNumber);
+            }
+            
             // Try to get a real token via TS.43 (currently a stub)
             String token = ts43Client.performEntitlementCheck(subId, phoneNumber);
             if (token == null) {
-                token = "STUB_TOKEN_FOR_TESTING";
+                // Fallback to fake JWT for edge cases (SocketTimeout, generic IOException)
+                token = ts43Client.generateStubToken();
+                Log.w(TAG, "TS.43 returned null, using fallback fake JWT token");
             }
 
             PhoneNumberVerification verification = new PhoneNumberVerification(
@@ -143,29 +234,6 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
                 null,
                 ApiMetadata.DEFAULT
             );
-        }
-    }
-
-    private VerifyPhoneNumberRequest bundleToVerifyRequest(Bundle bundle) {
-        if (bundle == null) return null;
-        try {
-            String phoneNumber = bundle.getString("phoneNumber");
-            long subscriptionId = bundle.getLong("subscriptionId", 0L);
-            boolean allowFallback = bundle.getBoolean("allowFallback", true);
-            int verificationType = bundle.getInt("verificationType", PhoneNumberVerification.METHOD_TS43);
-            return new VerifyPhoneNumberRequest(
-                phoneNumber,
-                subscriptionId,
-                null,
-                new Bundle(),
-                null,
-                allowFallback,
-                verificationType,
-                null
-            );
-        } catch (Exception e) {
-            Log.w(TAG, "bundleToVerifyRequest failed", e);
-            return null;
         }
     }
 

@@ -11,14 +11,22 @@ import android.util.Base64;
 import android.util.Log;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.InvalidKeyException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Client for GSMA TS.43 Service Entitlement Configuration.
@@ -60,6 +68,7 @@ public class Ts43Client {
     // Interface for SIM authentication to allow testing
     interface SimAuthProvider {
         String getNetworkOperator();
+        String getSubscriberId();
         String getIccAuthentication(int appType, int authType, String data);
     }
 
@@ -70,6 +79,16 @@ public class Ts43Client {
             @Override
             public String getNetworkOperator() {
                 return tm.getNetworkOperator();
+            }
+
+            @Override
+            public String getSubscriberId() {
+                try {
+                    return tm.getSubscriberId();
+                } catch (SecurityException e) {
+                    Log.e(TAG, "Permission denied for getSubscriberId", e);
+                    return null;
+                }
             }
 
             @Override
@@ -176,10 +195,127 @@ public class Ts43Client {
             logger.w(TAG, "TS.43 check failed or not implemented by carrier. Returning fake token.");
             return "STUB_TOKEN_FROM_TS43_CLIENT";
 
+        } catch (java.net.UnknownHostException e) {
+            logger.w(TAG, "TS.43 DNS error (UnknownHost): " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning stub token.");
+            return generateStubToken();
+        } catch (java.net.ConnectException e) {
+            logger.w(TAG, "TS.43 Connection Refused: " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning stub token.");
+            return generateStubToken();
+        } catch (java.io.FileNotFoundException e) {
+            logger.w(TAG, "TS.43 HTTP 404 (Not Found): " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning stub token.");
+            return generateStubToken();
+        } catch (java.net.SocketTimeoutException e) {
+            logger.e(TAG, "TS.43 Timeout: " + e.getMessage() + ". Network might be flaky, NOT falling back to stub.");
+            return null;
+        } catch (IOException e) {
+            logger.e(TAG, "TS.43 generic IO error: " + e.getMessage(), e);
+            return null;
         } catch (Exception e) {
-            logger.e(TAG, "TS.43 check failed", e);
+            logger.e(TAG, "TS.43 check failed with unexpected error", e);
             return null;
         }
+    }
+
+    /**
+     * Generates a syntactically valid JWT stub token for Jibe carriers.
+     * Package-private for use by ConstellationServiceImpl fallback.
+     */
+    String generateStubToken() {
+        // Generate a syntactically valid JWT (Header.Payload.Signature)
+        // Header: {"alg":"none","typ":"JWT"}
+        // Payload: {"exp":<future>,"iat":<now>,"iss":"google"}
+        // Signature: empty
+        
+        long now = System.currentTimeMillis() / 1000;
+        long exp = now + 86400; // 24 hours
+        
+        String header = "{\"alg\":\"none\",\"typ\":\"JWT\"}";
+        String payload = String.format("{\"exp\":%d,\"iat\":%d,\"iss\":\"google\",\"sub\":\"stub_token_for_jibe\"}", exp, now);
+        
+        String headerB64 = base64Decoder.encodeToString(header.getBytes(StandardCharsets.UTF_8)).replace("\n", "").replace("=", "");
+        String payloadB64 = base64Decoder.encodeToString(payload.getBytes(StandardCharsets.UTF_8)).replace("\n", "").replace("=", "");
+        
+        return headerB64 + "." + payloadB64 + ".";
+    }
+
+    private static class SimAuthResult {
+        byte[] res;
+        byte[] ck;
+        byte[] ik;
+        byte[] auts;
+    }
+
+    private SimAuthResult parseSimResponse(String responseBase64) {
+        if (responseBase64 == null) return null;
+        byte[] data = base64Decoder.decode(responseBase64);
+        if (data == null || data.length < 2) return null;
+
+        SimAuthResult result = new SimAuthResult();
+        int tag = data[0] & 0xFF;
+        
+        if (tag == 0xDB) { // Success
+            int offset = 2; // Skip Tag + Len (assuming 1 byte len)
+            // TODO: Handle multi-byte length if needed
+            
+            while (offset < data.length) {
+                int t = data[offset] & 0xFF;
+                int l = data[offset + 1] & 0xFF;
+                offset += 2;
+                
+                if (offset + l > data.length) break;
+                
+                byte[] val = new byte[l];
+                System.arraycopy(data, offset, val, 0, l);
+                
+                if (t == 0xDC) result.res = val;
+                else if (t == 0xDD) result.ck = val;
+                else if (t == 0xDE) result.ik = val;
+                
+                offset += l;
+            }
+        } else if (tag == 0xDC) { // Sync Failure
+            int offset = 2;
+            while (offset < data.length) {
+                int t = data[offset] & 0xFF;
+                int l = data[offset + 1] & 0xFF;
+                offset += 2;
+                if (t == 0xDD) { // AUTS tag in Sync Failure? Need to verify
+                     // Actually usually it's just AUTS
+                }
+                offset += l;
+            }
+        }
+        
+        return result;
+    }
+
+    private byte[] calculateMac(byte[] k_aut, byte[] packet) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA1");
+            mac.init(new SecretKeySpec(k_aut, "HmacSHA1"));
+            return mac.doFinal(packet);
+        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
+            logger.e(TAG, "Failed to calculate MAC", e);
+            return null;
+        }
+    }
+
+    private byte[] deriveKey(byte[] mk, byte modifier) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA1");
+            mac.init(new SecretKeySpec(mk, "HmacSHA1"));
+            return mac.doFinal(new byte[]{modifier});
+        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
+            logger.e(TAG, "Failed to derive key", e);
+            return null;
+        }
+    }
+
+    private String getNai(String imsi, String mcc, String mnc) {
+        // 0<IMSI>@nai.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org
+        // MNC must be 3 digits in the domain
+        String mnc3 = mnc.length() == 2 ? "0" + mnc : mnc;
+        return String.format("0%s@nai.epc.mnc%s.mcc%s.3gppnetwork.org", imsi, mnc3, mcc);
     }
 
     String handleEapAkaChallenge(int subId, String wwwAuthenticate) {
@@ -237,24 +373,19 @@ public class Ts43Client {
         }
         
         // Calculate Response using SIM
-        String simResponse = calculateEapAkaResponse(subId, rand, autn);
-        if (simResponse == null) {
+        String eapResponse = generateEapAkaResponse(subId, id, rand, autn);
+        if (eapResponse == null) {
             return null;
         }
         
-        // Construct EAP Response
-        // TODO: Implement full EAP response construction with MAC
-        return "EAP-AKA response=\"" + simResponse + "\"";
+        return "EAP-AKA response=\"" + eapResponse + "\"";
     }
 
     /**
-     * Calculates the EAP-AKA response using the SIM card.
+     * Generates the EAP-AKA response packet (Base64 encoded).
      */
-    private String calculateEapAkaResponse(int subId, byte[] rand, byte[] autn) {
-        // Use TelephonyManager.getIccAuthentication()
-        // APPTYPE_USIM = 2
-        // AUTHTYPE_EAP_AKA = 129
-        
+    private String generateEapAkaResponse(int subId, int id, byte[] rand, byte[] autn) {
+        // 1. Get SIM Authentication
         // Input format for getIccAuthentication:
         // Length of RAND (1 byte) + RAND + Length of AUTN (1 byte) + AUTN
         byte[] authData = new byte[1 + rand.length + 1 + autn.length];
@@ -266,29 +397,161 @@ public class Ts43Client {
         String authDataStr = base64Decoder.encodeToString(authData);
         logger.d(TAG, "Calling getIccAuthentication with: " + authDataStr);
         
+        String simResponseBase64;
         try {
-            // Requires READ_PRIVILEGED_PHONE_STATE or carrier privileges
-            String response = simAuthProvider.getIccAuthentication(
+            simResponseBase64 = simAuthProvider.getIccAuthentication(
                 TelephonyManager.APPTYPE_USIM,
                 TelephonyManager.AUTHTYPE_EAP_AKA,
                 authDataStr
             );
-            
-            if (response == null) {
-                logger.e(TAG, "getIccAuthentication returned null");
-                return null;
-            }
-            
-            logger.d(TAG, "getIccAuthentication response: " + response);
-            // Response format is usually Base64 encoded RES (or more complex structure)
-            // We need to parse it to get RES, CK, IK
-            return response;
-            
         } catch (SecurityException e) {
             logger.e(TAG, "Permission denied for getIccAuthentication", e);
             return null;
         }
+
+        if (simResponseBase64 == null) {
+            logger.e(TAG, "getIccAuthentication returned null");
+            return null;
+        }
+
+        // 2. Parse SIM Response
+        SimAuthResult authResult = parseSimResponse(simResponseBase64);
+        if (authResult == null) {
+            logger.e(TAG, "Failed to parse SIM response");
+            return null;
+        }
+
+        if (authResult.auts != null) {
+            // Synchronization Failure
+            // Construct EAP-Response/AKA-Synchronization-Failure
+            // Code=2, ID=id, Type=23, Subtype=4 (Sync-Failure)
+            // Attributes: AT_AUTS
+            return constructSyncFailure(id, authResult.auts);
+        }
+
+        if (authResult.res == null || authResult.ck == null || authResult.ik == null) {
+            logger.e(TAG, "SIM response missing RES, CK, or IK");
+            return null;
+        }
+
+        // 3. Derive Keys
+        String imsi = simAuthProvider.getSubscriberId();
+        if (imsi == null) {
+            logger.e(TAG, "Failed to get IMSI");
+            return null;
+        }
+        String networkOperator = simAuthProvider.getNetworkOperator();
+        if (networkOperator == null || networkOperator.length() < 5) {
+             logger.e(TAG, "Invalid network operator");
+             return null;
+        }
+        String mcc = networkOperator.substring(0, 3);
+        String mnc = networkOperator.substring(3);
+        String identity = getNai(imsi, mcc, mnc);
+
+        byte[] mkInput = new byte[identity.length() + authResult.ik.length + authResult.ck.length];
+        int pos = 0;
+        System.arraycopy(identity.getBytes(StandardCharsets.UTF_8), 0, mkInput, pos, identity.length()); pos += identity.length();
+        System.arraycopy(authResult.ik, 0, mkInput, pos, authResult.ik.length); pos += authResult.ik.length;
+        System.arraycopy(authResult.ck, 0, mkInput, pos, authResult.ck.length);
+
+        byte[] mk;
+        try {
+            MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+            mk = sha1.digest(mkInput);
+        } catch (NoSuchAlgorithmException e) {
+            logger.e(TAG, "SHA-1 not supported", e);
+            return null;
+        }
+
+        byte[] k_aut = deriveKey(mk, (byte) 2); // K_aut = PRF(MK, 2)
+        if (k_aut == null) return null;
+        // K_aut is first 160 bits (20 bytes) of PRF output. HMAC-SHA1 output is 20 bytes, so we use it all.
+
+        // 4. Construct EAP Response Packet
+        // Code=2 (Response), ID=id, Type=23, Subtype=1 (Challenge)
+        // Attributes: AT_RES, AT_MAC
+        
+        // AT_RES: Type 3, Length (1 + res_len/4), RES (padded)
+        int resLen = authResult.res.length;
+        int resPad = (4 - (resLen % 4)) % 4;
+        int atResLen = 4 + resLen + resPad; // Header + RES + Pad
+        
+        // AT_MAC: Type 11, Length 5 (20 bytes), MAC (16 bytes) + Reserved (2 bytes) ?
+        // RFC 4187: AT_MAC Value field is 16 bytes.
+        // Format: Type(1) + Length(1) + Reserved(2) + MAC(16) = 20 bytes.
+        int atMacLen = 20;
+        
+        int totalLen = 8 + atResLen + atMacLen; // Header(8) + AT_RES + AT_MAC
+        
+        byte[] packet = new byte[totalLen];
+        pos = 0;
+        
+        // Header
+        packet[pos++] = 0x02; // Code: Response
+        packet[pos++] = (byte) id;
+        packet[pos++] = (byte) (totalLen >> 8);
+        packet[pos++] = (byte) totalLen;
+        packet[pos++] = (byte) EAP_AKA_TYPE;
+        packet[pos++] = 0x01; // Subtype: Challenge
+        packet[pos++] = 0x00; // Reserved
+        packet[pos++] = 0x00; // Reserved
+        
+        // AT_RES
+        packet[pos++] = (byte) AT_RES;
+        packet[pos++] = (byte) (atResLen / 4);
+        packet[pos++] = (byte) (resLen * 8); // RES Length in bits
+        packet[pos++] = 0x00; // Reserved
+        System.arraycopy(authResult.res, 0, packet, pos, resLen);
+        pos += resLen;
+        pos += resPad; // Skip padding (already 0)
+        
+        // AT_MAC (initialized to 0)
+        int macOffset = pos;
+        packet[pos++] = (byte) AT_MAC;
+        packet[pos++] = 0x05; // Length 5 words
+        packet[pos++] = 0x00; // Reserved
+        packet[pos++] = 0x00; // Reserved
+        pos += 16; // MAC placeholder
+        
+        // Calculate MAC
+        byte[] mac = calculateMac(k_aut, packet);
+        if (mac == null) return null;
+        
+        // Copy first 16 bytes of MAC to packet
+        System.arraycopy(mac, 0, packet, macOffset + 4, 16);
+        
+        return base64Decoder.encodeToString(packet);
     }
+
+    private String constructSyncFailure(int id, byte[] auts) {
+        // AT_AUTS: Type 4, Length 4 (16 bytes), AUTS (14 bytes)
+        // Format: Type(1) + Length(1) + AUTS(14) = 16 bytes
+        int atAutsLen = 16;
+        int totalLen = 8 + atAutsLen;
+        
+        byte[] packet = new byte[totalLen];
+        int pos = 0;
+        
+        // Header
+        packet[pos++] = 0x02; // Code: Response
+        packet[pos++] = (byte) id;
+        packet[pos++] = (byte) (totalLen >> 8);
+        packet[pos++] = (byte) totalLen;
+        packet[pos++] = (byte) EAP_AKA_TYPE;
+        packet[pos++] = 0x04; // Subtype: Synchronization-Failure
+        packet[pos++] = 0x00; // Reserved
+        packet[pos++] = 0x00; // Reserved
+        
+        // AT_AUTS
+        packet[pos++] = 0x04; // Type: AT_AUTS
+        packet[pos++] = 0x04; // Length: 4 words
+        System.arraycopy(auts, 0, packet, pos, auts.length);
+        
+        return base64Decoder.encodeToString(packet);
+    }
+
+
 
     private String extractToken(String responseBody) {
         // Simple regex to find token in JSON/XML

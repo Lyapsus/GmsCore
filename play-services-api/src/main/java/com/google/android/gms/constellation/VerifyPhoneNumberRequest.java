@@ -14,18 +14,21 @@ import com.google.android.gms.common.internal.safeparcel.SafeParcelableCreatorAn
 
 import java.util.List;
 
+// NOTE: GMS VerifyPhoneNumberRequest field 5 is List<ImsiRequest>, NOT SimCapability.
+
 /**
  * Request to verify a phone number via Constellation.
  *
  * Based on decompiled GMS, fields:
  * - phoneNumber: Phone number to verify (E.164 format)
- * - subscriptionId: SIM subscription ID
- * - idTokenRequest: Optional request for ID token
- * - extras: Additional parameters
- * - simCapabilities: List of SIM capability info
- * - allowFallback: Whether to allow fallback verification methods
- * - verificationType: Preferred verification type
- * - verificationCapabilities: Supported verification methods
+     * - subscriptionId: SIM subscription ID
+     * - idTokenRequest: Optional request for ID token
+     * - extras: Additional parameters
+     * - imsiRequests: List of IMSI requests (ImsiRequest)
+     * - allowFallback: Whether to allow fallback verification methods
+     * - verificationType: Preferred verification type
+     * - verificationCapabilities: Supported verification methods
+
  */
 @SafeParcelable.Class
 public class VerifyPhoneNumberRequest extends AbstractSafeParcelable {
@@ -38,7 +41,7 @@ public class VerifyPhoneNumberRequest extends AbstractSafeParcelable {
     @Field(4)
     public Bundle extras;
     @Field(5)
-    public List<SimCapability> simCapabilities;
+    public List<ImsiRequest> imsiRequests;
     @Field(6)
     public boolean allowFallback;
     @Field(7)
@@ -52,7 +55,7 @@ public class VerifyPhoneNumberRequest extends AbstractSafeParcelable {
             @Param(2) long subscriptionId,
             @Param(3) IdTokenRequest idTokenRequest,
             @Param(4) Bundle extras,
-            @Param(5) List<SimCapability> simCapabilities,
+            @Param(5) List<ImsiRequest> imsiRequests,
             @Param(6) boolean allowFallback,
             @Param(7) int verificationType,
             @Param(8) List<VerificationCapability> verificationCapabilities) {
@@ -60,7 +63,7 @@ public class VerifyPhoneNumberRequest extends AbstractSafeParcelable {
         this.subscriptionId = subscriptionId;
         this.idTokenRequest = idTokenRequest;
         this.extras = extras;
-        this.simCapabilities = simCapabilities;
+        this.imsiRequests = imsiRequests;
         this.allowFallback = allowFallback;
         this.verificationType = verificationType;
         this.verificationCapabilities = verificationCapabilities;
