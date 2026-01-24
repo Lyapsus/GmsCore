@@ -6,6 +6,12 @@
 package org.microg.gms.constellation;
 
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.provider.Settings;
+import android.telephony.CarrierConfigManager;
 import android.telephony.TelephonyManager;
 import android.util.Base64;
 import android.util.Log;
@@ -48,6 +54,15 @@ public class Ts43Client {
     private static final int AT_RES = 3;
     private static final int AT_MAC = 11;
 
+    private static final String EAP_RELAY_ACCEPT = "application/vnd.gsma.eap-relay.v1.0+json";
+    private static final String NAI_FORMAT = "0%s@nai.epc.mnc%s.mcc%s.3gppnetwork.org";
+    private static final long STUB_JWT_EXP_SECONDS = 86400;
+
+    private static final int NETWORK_BIND_NONE = 0;
+    private static final int NETWORK_BIND_WIFI = 1;
+    private static final int NETWORK_BIND_CELLULAR = 2;
+    private static final int TS43_TIMEOUT_MS = 15000;
+
     // Interface for logging
     interface Logger {
         void d(String tag, String msg);
@@ -68,8 +83,59 @@ public class Ts43Client {
     // Interface for SIM authentication to allow testing
     interface SimAuthProvider {
         String getNetworkOperator();
+        String getSimOperator();
         String getSubscriberId();
         String getIccAuthentication(int appType, int authType, String data);
+    }
+
+    private static final class Ts43SimInfo {
+        private final String imsi;
+        private final String simOperator;
+
+        private Ts43SimInfo(String imsi, String simOperator) {
+            this.imsi = imsi;
+            this.simOperator = simOperator;
+        }
+    }
+
+    public static final class EntitlementResult {
+        public final String token;
+        public final boolean stub;
+        public final boolean ineligible;
+        public final String reason;
+
+        private EntitlementResult(String token, boolean stub, boolean ineligible, String reason) {
+            this.token = token;
+            this.stub = stub;
+            this.ineligible = ineligible;
+            this.reason = reason;
+        }
+
+        public static EntitlementResult success(String token) {
+            return new EntitlementResult(token, false, false, "success");
+        }
+
+        public static EntitlementResult stub(String token, String reason) {
+            return new EntitlementResult(token, true, false, reason);
+        }
+
+        public static EntitlementResult ineligible(String token, String reason) {
+            return new EntitlementResult(token, true, true, reason);
+        }
+
+        public static EntitlementResult error(String reason) {
+            return new EntitlementResult(null, false, false, reason);
+        }
+    }
+
+    private static final class EntitlementEndpoint {
+        final String url;
+        final boolean fromCarrierConfig;
+
+        private EntitlementEndpoint(String url, boolean fromCarrierConfig) {
+            this.url = url;
+            this.fromCarrierConfig = fromCarrierConfig;
+        }
     }
 
     public Ts43Client(Context context) {
@@ -79,6 +145,11 @@ public class Ts43Client {
             @Override
             public String getNetworkOperator() {
                 return tm.getNetworkOperator();
+            }
+
+            @Override
+            public String getSimOperator() {
+                return tm.getSimOperator();
             }
 
             @Override
@@ -133,87 +204,129 @@ public class Ts43Client {
      * @param phoneNumber The phone number associated with the subscription.
      * @return The RCS configuration token (JWT) or null if failed.
      */
-    public String performEntitlementCheck(int subId, String phoneNumber) {
+    public EntitlementResult performEntitlementCheckResult(int subId, String phoneNumber, String requestImsi, String requestMsisdn) {
         logger.i(TAG, "Starting TS.43 entitlement check for subId=" + subId);
-        
-        // 1. Get MCC/MNC
-        String networkOperator = simAuthProvider.getNetworkOperator();
-        if (networkOperator == null || networkOperator.length() < 5) {
-            logger.e(TAG, "Invalid network operator: " + networkOperator);
-            return null;
+
+        Ts43SimInfo simInfo = resolveSimInfo(subId, requestImsi, requestMsisdn);
+        if (simInfo == null) {
+            logger.e(TAG, "Unable to resolve SIM info for entitlement check");
+            return EntitlementResult.error("sim-info");
         }
-        String mcc = networkOperator.substring(0, 3);
-        String mnc = networkOperator.substring(3);
-        
+
+        if (phoneNumber == null || phoneNumber.isEmpty() || !phoneNumber.startsWith("+")) {
+            logger.w(TAG, "Phone number missing or non-E164, forcing SIM lookup (value=" + phoneNumber + ")");
+            phoneNumber = null;
+        }
+
+        // 1. Get MCC/MNC from SIM operator (NOT network operator)
+        String simOperator = simInfo.simOperator;
+        if (simOperator == null || simOperator.length() < 5) {
+            logger.e(TAG, "Invalid SIM operator: " + simOperator);
+            return EntitlementResult.error("sim-operator");
+        }
+        String mcc = simOperator.substring(0, 3);
+        String mnc = simOperator.substring(3);
+        logger.d(TAG, "Parsed MCC/MNC from SIM operator: mcc=" + mcc + ", mnc=" + mnc);
+
         // 2. Construct Entitlement Server URL
         // Format: https://aes.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org/cred_service
         // Note: MNC must be 3 digits (padded with 0 if needed)
         String mnc3 = mnc.length() == 2 ? "0" + mnc : mnc;
-        String urlString = String.format("https://aes.mnc%s.mcc%s.pub.3gppnetwork.org/cred_service", mnc3, mcc);
-        logger.d(TAG, "Entitlement URL: " + urlString);
+        String fallbackUrl = String.format("https://aes.mnc%s.mcc%s.pub.3gppnetwork.org/cred_service", mnc3, mcc);
+        EntitlementEndpoint endpoint = resolveEntitlementUrl(subId, fallbackUrl);
+        String urlString = endpoint.url;
+        logger.d(TAG, "Entitlement URL: " + urlString + " (simOperator=" + simOperator + ")");
+        if (!endpoint.fromCarrierConfig) {
+            // For Jibe carriers without TS.43 (like Spusu):
+            // For Jibe carriers without TS.43: return INELIGIBLE with empty token
+            // This triggers Messages to use "UpiIneligibleMsisdnToken" magic constant
+            // when upi_enabled_state is 5 or 6 (which Spusu has)
+            logger.w(TAG, "CarrierConfig entitlement URL missing; returning INELIGIBLE with empty token to trigger UpiIneligibleMsisdnToken");
+            return EntitlementResult.ineligible("", "jibe-no-ts43");
+        }
 
         try {
             // 3. Initial Request (expecting 401 Challenge)
-            HttpURLConnection connection = (HttpURLConnection) new URL(urlString).openConnection();
+            HttpURLConnection connection = (HttpURLConnection) openNetworkConnection(urlString, subId);
+            connection.setConnectTimeout(TS43_TIMEOUT_MS);
+            connection.setReadTimeout(TS43_TIMEOUT_MS);
             connection.setRequestMethod("GET");
-            connection.setRequestProperty("Accept", "application/vnd.gsma.eap-relay.v1.0+json");
-            
+            connection.setRequestProperty("Accept", EAP_RELAY_ACCEPT);
+            logger.d(TAG, "Request headers: Accept=" + EAP_RELAY_ACCEPT);
+
             int responseCode = connection.getResponseCode();
-            logger.d(TAG, "Initial response code: " + responseCode);
+            logger.d(TAG, "Initial response code: " + responseCode + " (url=" + urlString + ")");
 
             if (responseCode == 401) {
                 String wwwAuthenticate = connection.getHeaderField("WWW-Authenticate");
-                logger.d(TAG, "Challenge: " + wwwAuthenticate);
+                logger.d(TAG, "Challenge: " + wwwAuthenticate + " (subId=" + subId + ")");
+
                 
                 if (wwwAuthenticate != null && wwwAuthenticate.contains("EAP-AKA")) {
                     // 4. Handle EAP-AKA Challenge
-                    String challengeResponse = handleEapAkaChallenge(subId, wwwAuthenticate);
+                    String challengeResponse = handleEapAkaChallenge(subId, wwwAuthenticate, simInfo.imsi, simInfo.simOperator);
                     if (challengeResponse != null) {
                         // 5. Authenticated Request
                         connection.disconnect();
-                        connection = (HttpURLConnection) new URL(urlString).openConnection();
+                        connection = (HttpURLConnection) openNetworkConnection(urlString, subId);
+                        connection.setConnectTimeout(TS43_TIMEOUT_MS);
+                        connection.setReadTimeout(TS43_TIMEOUT_MS);
                         connection.setRequestMethod("GET");
                         connection.setRequestProperty("Authorization", challengeResponse);
-                        connection.setRequestProperty("Accept", "application/vnd.gsma.eap-relay.v1.0+json");
-                        
+                        connection.setRequestProperty("Accept", EAP_RELAY_ACCEPT);
+
                         responseCode = connection.getResponseCode();
                         logger.d(TAG, "Authenticated response code: " + responseCode);
                         
                         if (responseCode == 200) {
                             String responseBody = readStream(connection.getInputStream());
                             logger.d(TAG, "Response body: " + responseBody);
-                            return extractToken(responseBody);
+                            String token = extractToken(responseBody);
+                            if (token == null) {
+                                logger.w(TAG, "Token missing from TS.43 response, returning stub");
+                                return EntitlementResult.stub(generateStubToken(), "missing-token");
+                            }
+                            return EntitlementResult.success(token);
                         }
                     }
                 }
             } else if (responseCode == 200) {
                 // Already authenticated?
                 String responseBody = readStream(connection.getInputStream());
-                return extractToken(responseBody);
+                String token = extractToken(responseBody);
+                if (token == null) {
+                    logger.w(TAG, "Token missing from TS.43 response, returning stub");
+                    return EntitlementResult.stub(generateStubToken(), "missing-token");
+                }
+                return EntitlementResult.success(token);
             }
 
-            logger.w(TAG, "TS.43 check failed or not implemented by carrier. Returning fake token.");
-            return "STUB_TOKEN_FROM_TS43_CLIENT";
+            logger.w(TAG, "TS.43 check failed or not implemented by carrier. Returning stub JWT.");
+            return EntitlementResult.stub(generateStubToken(), "ts43-fallback");
 
         } catch (java.net.UnknownHostException e) {
-            logger.w(TAG, "TS.43 DNS error (UnknownHost): " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning stub token.");
-            return generateStubToken();
+            logger.w(TAG, "TS.43 DNS error (UnknownHost): " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning empty token.");
+            return EntitlementResult.stub(generateStubToken(), "unknown-host");
         } catch (java.net.ConnectException e) {
-            logger.w(TAG, "TS.43 Connection Refused: " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning stub token.");
-            return generateStubToken();
+            logger.w(TAG, "TS.43 Connection Refused: " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning empty token.");
+            return EntitlementResult.stub(generateStubToken(), "connection-refused");
         } catch (java.io.FileNotFoundException e) {
-            logger.w(TAG, "TS.43 HTTP 404 (Not Found): " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning stub token.");
-            return generateStubToken();
+            logger.w(TAG, "TS.43 HTTP 404 (Not Found): " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning empty token.");
+            return EntitlementResult.stub(generateStubToken(), "not-found");
         } catch (java.net.SocketTimeoutException e) {
             logger.e(TAG, "TS.43 Timeout: " + e.getMessage() + ". Network might be flaky, NOT falling back to stub.");
-            return null;
+            return EntitlementResult.error("timeout");
         } catch (IOException e) {
             logger.e(TAG, "TS.43 generic IO error: " + e.getMessage(), e);
-            return null;
+            return EntitlementResult.error("io-error");
         } catch (Exception e) {
             logger.e(TAG, "TS.43 check failed with unexpected error", e);
-            return null;
+            return EntitlementResult.error("unexpected");
         }
+    }
+
+    public String performEntitlementCheck(int subId, String phoneNumber, String requestImsi, String requestMsisdn) {
+        return performEntitlementCheckResult(subId, phoneNumber, requestImsi, requestMsisdn).token;
     }
 
     /**
@@ -227,7 +340,7 @@ public class Ts43Client {
         // Signature: empty
         
         long now = System.currentTimeMillis() / 1000;
-        long exp = now + 86400; // 24 hours
+        long exp = now + STUB_JWT_EXP_SECONDS; // 24 hours
         
         String header = "{\"alg\":\"none\",\"typ\":\"JWT\"}";
         String payload = String.format("{\"exp\":%d,\"iat\":%d,\"iss\":\"google\",\"sub\":\"stub_token_for_jibe\"}", exp, now);
@@ -245,6 +358,35 @@ public class Ts43Client {
         byte[] auts;
     }
 
+    private static final class LengthInfo {
+        final int length;
+        final int bytes;
+
+        private LengthInfo(int length, int bytes) {
+            this.length = length;
+            this.bytes = bytes;
+        }
+    }
+
+    private LengthInfo readLength(byte[] data, int offset) {
+        if (offset >= data.length) {
+            return null;
+        }
+        int first = data[offset] & 0xFF;
+        if ((first & 0x80) == 0) {
+            return new LengthInfo(first, 1);
+        }
+        int count = first & 0x7F;
+        if (count == 0 || count > 2 || offset + count >= data.length) {
+            return null;
+        }
+        int length = 0;
+        for (int i = 0; i < count; i++) {
+            length = (length << 8) | (data[offset + 1 + i] & 0xFF);
+        }
+        return new LengthInfo(length, 1 + count);
+    }
+
     private SimAuthResult parseSimResponse(String responseBase64) {
         if (responseBase64 == null) return null;
         byte[] data = base64Decoder.decode(responseBase64);
@@ -252,40 +394,49 @@ public class Ts43Client {
 
         SimAuthResult result = new SimAuthResult();
         int tag = data[0] & 0xFF;
-        
-        if (tag == 0xDB) { // Success
-            int offset = 2; // Skip Tag + Len (assuming 1 byte len)
-            // TODO: Handle multi-byte length if needed
-            
-            while (offset < data.length) {
-                int t = data[offset] & 0xFF;
-                int l = data[offset + 1] & 0xFF;
-                offset += 2;
-                
-                if (offset + l > data.length) break;
-                
-                byte[] val = new byte[l];
-                System.arraycopy(data, offset, val, 0, l);
-                
+        LengthInfo outerLength = readLength(data, 1);
+        if (outerLength == null) {
+            logger.w(TAG, "Failed to parse SIM response length");
+            return null;
+        }
+
+        int offset = 1 + outerLength.bytes;
+        int end = offset + outerLength.length;
+        if (end > data.length) {
+            logger.w(TAG, "SIM response length exceeds buffer: length=" + outerLength.length + ", data=" + data.length);
+            end = data.length;
+        }
+
+        while (offset < end) {
+            if (offset + 1 >= end) {
+                break;
+            }
+            int t = data[offset] & 0xFF;
+            LengthInfo tlvLength = readLength(data, offset + 1);
+            if (tlvLength == null) {
+                logger.w(TAG, "Failed to parse SIM TLV length at offset=" + offset);
+                return null;
+            }
+            int valueOffset = offset + 1 + tlvLength.bytes;
+            int valueEnd = valueOffset + tlvLength.length;
+            if (valueEnd > end) {
+                logger.w(TAG, "SIM TLV length exceeds buffer (tag=" + t + ", len=" + tlvLength.length + ")");
+                break;
+            }
+
+            byte[] val = Arrays.copyOfRange(data, valueOffset, valueEnd);
+
+            if (tag == 0xDB) { // Success
                 if (t == 0xDC) result.res = val;
                 else if (t == 0xDD) result.ck = val;
                 else if (t == 0xDE) result.ik = val;
-                
-                offset += l;
+            } else if (tag == 0xDC) { // Sync Failure
+                if (t == 0xDD) result.auts = val;
             }
-        } else if (tag == 0xDC) { // Sync Failure
-            int offset = 2;
-            while (offset < data.length) {
-                int t = data[offset] & 0xFF;
-                int l = data[offset + 1] & 0xFF;
-                offset += 2;
-                if (t == 0xDD) { // AUTS tag in Sync Failure? Need to verify
-                     // Actually usually it's just AUTS
-                }
-                offset += l;
-            }
+
+            offset = valueEnd;
         }
-        
+
         return result;
     }
 
@@ -315,11 +466,201 @@ public class Ts43Client {
         // 0<IMSI>@nai.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org
         // MNC must be 3 digits in the domain
         String mnc3 = mnc.length() == 2 ? "0" + mnc : mnc;
-        return String.format("0%s@nai.epc.mnc%s.mcc%s.3gppnetwork.org", imsi, mnc3, mcc);
+        String nai = String.format(NAI_FORMAT, imsi, mnc3, mcc);
+        logger.d(TAG, "Derived NAI: " + nai + " (format=" + NAI_FORMAT + ")");
+        return nai;
     }
 
-    String handleEapAkaChallenge(int subId, String wwwAuthenticate) {
+    private Ts43SimInfo resolveSimInfo(int subId, String requestImsi, String requestMsisdn) {
+        String simOperator = null;
+        String networkOperator = null;
+        String imsi = requestImsi;
+
+        // CRITICAL FIX: When subId is 0 or invalid, we MUST derive simOperator from the IMSI prefix
+        // because TelephonyManager.getSimOperator() returns the DEFAULT SIM, not the target SIM.
+        // IMSI format: MCC (3 digits) + MNC (2-3 digits) + MSIN (remaining)
+        // For Austria: 23203=Magenta, 23217=Spusu
+        
+        if (subId > 0) {
+            try {
+                TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+                if (tm != null) {
+                    TelephonyManager tmSub = tm.createForSubscriptionId(subId);
+                    simOperator = tmSub.getSimOperator();
+                    networkOperator = tmSub.getNetworkOperator();
+                    if (imsi == null || imsi.isEmpty()) {
+                        try {
+                            imsi = tmSub.getSubscriberId();
+                        } catch (SecurityException e) {
+                            logger.w(TAG, "Permission denied for subscriber ID (subId)", e);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                logger.w(TAG, "Failed to read SIM info for subId", e);
+            }
+        }
+
+        // If we have an IMSI from the request, derive simOperator from it (most reliable)
+        if (imsi != null && imsi.length() >= 5) {
+            // Try 3-digit MNC first (MCC=3, MNC=3)
+            String derivedOperator6 = imsi.substring(0, 6);
+            String derivedOperator5 = imsi.substring(0, 5);
+            
+            // Austrian carriers use 2-digit MNC (e.g., 23217 for Spusu, 23203 for Magenta)
+            // We'll use 5 digits (MCC+2-digit MNC) as the primary assumption
+            String derivedOperator = derivedOperator5;
+            
+            // Log what we derived
+            logger.d(TAG, "Derived simOperator from IMSI: " + derivedOperator + " (IMSI prefix)");
+            
+            // Override simOperator if we derived it from IMSI (more reliable than subId=0 lookup)
+            if (simOperator == null || simOperator.length() < 5 || subId <= 0) {
+                logger.i(TAG, "Using IMSI-derived operator " + derivedOperator + " instead of " + simOperator + " (subId=" + subId + ")");
+                simOperator = derivedOperator;
+            }
+        }
+
+        if (simOperator == null || simOperator.length() < 5) {
+            simOperator = simAuthProvider.getSimOperator();
+            logger.d(TAG, "Fallback to default simOperator: " + simOperator);
+        }
+
+        if (networkOperator == null || networkOperator.length() < 5) {
+            networkOperator = simAuthProvider.getNetworkOperator();
+        }
+
+        if (imsi == null || imsi.isEmpty()) {
+            imsi = simAuthProvider.getSubscriberId();
+        }
+
+        if (simOperator == null || simOperator.length() < 5) {
+            logger.e(TAG, "SIM operator missing or invalid");
+            return null;
+        }
+
+        if (imsi == null || imsi.isEmpty()) {
+            logger.e(TAG, "IMSI missing from SIM info");
+            return null;
+        }
+
+        if (requestMsisdn != null && requestMsisdn.startsWith("+")) {
+            logger.d(TAG, "Request MSISDN present: " + requestMsisdn);
+        }
+
+        logger.d(TAG, "Resolved SIM info: imsi=" + redact(imsi)
+                + ", simOperator=" + simOperator
+                + ", networkOperator=" + networkOperator
+                + ", subId=" + subId);
+        return new Ts43SimInfo(imsi, simOperator);
+    }
+
+    private String redact(String value) {
+        if (value == null || value.length() < 6) return "<redacted>";
+        return value.substring(0, 3) + "..." + value.substring(value.length() - 3);
+    }
+
+    private static final String ENTITLEMENT_URL_KEY = "entitlement_server_url_string";
+
+    private EntitlementEndpoint resolveEntitlementUrl(int subId, String fallbackUrl) {
+        try {
+            CarrierConfigManager manager = (CarrierConfigManager) context.getSystemService(Context.CARRIER_CONFIG_SERVICE);
+            if (manager != null) {
+                android.os.PersistableBundle bundle = manager.getConfigForSubId(subId);
+                if (bundle != null) {
+                    String entitlementUrl = bundle.getString(ENTITLEMENT_URL_KEY);
+                    if (entitlementUrl != null && !entitlementUrl.isEmpty()) {
+                        logger.d(TAG, "CarrierConfig entitlement URL: " + entitlementUrl + " (subId=" + subId + ")");
+                        return new EntitlementEndpoint(entitlementUrl, true);
+                    }
+                    logger.d(TAG, "CarrierConfig entitlement URL empty (subId=" + subId + ")");
+                } else {
+                    logger.d(TAG, "CarrierConfig bundle null (subId=" + subId + ")");
+                }
+            } else {
+                logger.d(TAG, "CarrierConfig manager null");
+            }
+        } catch (Exception e) {
+            logger.w(TAG, "Failed to read carrier config entitlement URL", e);
+        }
+
+        logger.d(TAG, "CarrierConfig entitlement URL empty, using fallback: " + fallbackUrl);
+        return new EntitlementEndpoint(fallbackUrl, false);
+    }
+
+    private HttpURLConnection openNetworkConnection(String urlString, int subId) throws IOException {
+        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        int mode = getNetworkBindMode();
+        if (cm != null && mode != NETWORK_BIND_NONE) {
+            Network network = findNetworkForMode(cm, mode);
+            if (network != null) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                LinkProperties linkProps = cm.getLinkProperties(network);
+                logger.d(TAG, "Binding TS.43 request to network mode=" + mode
+                        + ", transports=" + caps
+                        + ", ifaces=" + (linkProps != null ? linkProps.getInterfaceName() : "null")
+                        + ", subId=" + subId);
+                return (HttpURLConnection) network.openConnection(new URL(urlString));
+            }
+            logger.w(TAG, "Requested network mode not available, falling back to default network (mode=" + mode + ")");
+        }
+
+        logActiveNetwork(cm, subId);
+        return (HttpURLConnection) new URL(urlString).openConnection();
+    }
+
+    private void logActiveNetwork(ConnectivityManager cm, int subId) {
+        if (cm == null) {
+            logger.w(TAG, "ConnectivityManager unavailable (subId=" + subId + ")");
+            return;
+        }
+        Network network = cm.getActiveNetwork();
+        NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+        LinkProperties linkProps = cm.getLinkProperties(network);
+        logger.d(TAG, "Active network: " + network
+                + ", transports=" + caps
+                + ", ifaces=" + (linkProps != null ? linkProps.getInterfaceName() : "null")
+                + ", subId=" + subId);
+    }
+
+    private int getNetworkBindMode() {
+        // 0 = default network, 1 = Wi-Fi only, 2 = cellular only
+        try {
+            String value = Settings.Global.getString(context.getContentResolver(), "microg_ts43_network_mode");
+            if ("wifi".equalsIgnoreCase(value)) {
+                return NETWORK_BIND_WIFI;
+            }
+            if ("cellular".equalsIgnoreCase(value)) {
+                return NETWORK_BIND_CELLULAR;
+            }
+        } catch (Exception e) {
+            logger.w(TAG, "Failed to read microg_ts43_network_mode", e);
+        }
+        return NETWORK_BIND_NONE;
+    }
+
+    private Network findNetworkForMode(ConnectivityManager cm, int mode) {
+        Network[] networks = cm.getAllNetworks();
+        if (networks == null) return null;
+        for (Network network : networks) {
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            if (caps == null) continue;
+            if (mode == NETWORK_BIND_WIFI && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                return network;
+            }
+            if (mode == NETWORK_BIND_CELLULAR && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                return network;
+            }
+        }
+        return null;
+    }
+
+    String handleEapAkaChallenge(int subId, String wwwAuthenticate, String imsi, String simOperator) {
         logger.d(TAG, "Handling EAP-AKA challenge: " + wwwAuthenticate);
+        if (imsi == null || simOperator == null || simOperator.length() < 5) {
+            logger.e(TAG, "Missing IMSI or SIM operator for EAP-AKA");
+            return null;
+        }
         
         // Extract nonce (EAP payload)
         // Header format: EAP-AKA realm="...", nonce="..."
@@ -373,7 +714,7 @@ public class Ts43Client {
         }
         
         // Calculate Response using SIM
-        String eapResponse = generateEapAkaResponse(subId, id, rand, autn);
+        String eapResponse = generateEapAkaResponse(subId, id, rand, autn, imsi, simOperator);
         if (eapResponse == null) {
             return null;
         }
@@ -384,7 +725,7 @@ public class Ts43Client {
     /**
      * Generates the EAP-AKA response packet (Base64 encoded).
      */
-    private String generateEapAkaResponse(int subId, int id, byte[] rand, byte[] autn) {
+    private String generateEapAkaResponse(int subId, int id, byte[] rand, byte[] autn, String imsi, String simOperator) {
         // 1. Get SIM Authentication
         // Input format for getIccAuthentication:
         // Length of RAND (1 byte) + RAND + Length of AUTN (1 byte) + AUTN
@@ -435,18 +776,16 @@ public class Ts43Client {
         }
 
         // 3. Derive Keys
-        String imsi = simAuthProvider.getSubscriberId();
         if (imsi == null) {
-            logger.e(TAG, "Failed to get IMSI");
+            logger.e(TAG, "Missing IMSI for key derivation");
             return null;
         }
-        String networkOperator = simAuthProvider.getNetworkOperator();
-        if (networkOperator == null || networkOperator.length() < 5) {
-             logger.e(TAG, "Invalid network operator");
-             return null;
+        if (simOperator == null || simOperator.length() < 5) {
+            logger.e(TAG, "Invalid SIM operator for key derivation");
+            return null;
         }
-        String mcc = networkOperator.substring(0, 3);
-        String mnc = networkOperator.substring(3);
+        String mcc = simOperator.substring(0, 3);
+        String mnc = simOperator.substring(3);
         String identity = getNai(imsi, mcc, mnc);
 
         byte[] mkInput = new byte[identity.length() + authResult.ik.length + authResult.ck.length];

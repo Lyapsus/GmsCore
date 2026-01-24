@@ -21,6 +21,7 @@ import com.google.android.gms.constellation.GetIidTokenRequest;
 import com.google.android.gms.constellation.GetIidTokenResponse;
 import com.google.android.gms.constellation.GetPnvCapabilitiesRequest;
 import com.google.android.gms.constellation.GetPnvCapabilitiesResponse;
+import com.google.android.gms.constellation.ImsiRequest;
 import com.google.android.gms.constellation.PhoneNumberInfo;
 import com.google.android.gms.constellation.PhoneNumberVerification;
 import com.google.android.gms.constellation.VerifyPhoneNumberRequest;
@@ -54,6 +55,8 @@ import java.util.List;
  */
 public class ConstellationServiceImpl extends IConstellationApiService.Stub {
     private static final String TAG = "GmsConstellationSvcImpl";
+
+    private static final long VERIFICATION_TTL_MS = 86400000L; // 24 hours
 
     private final Context context;
     private final Ts43Client ts43Client;
@@ -191,30 +194,79 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
         try {
             String phoneNumber = request != null ? request.phoneNumber : null;
             int subId = request != null ? (int) request.subscriptionId : -1;
-            
-            // If phone number is null, try to get from SIM
-            if (phoneNumber == null || phoneNumber.isEmpty()) {
-                phoneNumber = getPhoneNumberFromSim(subId);
-                Log.d(TAG, "  Phone number from SIM (fallback): " + phoneNumber);
-            }
-            
+
             // Try to get a real token via TS.43 (currently a stub)
-            String token = ts43Client.performEntitlementCheck(subId, phoneNumber);
+            String imsi = null;
+            String msisdn = null;
+            if (request != null && request.imsiRequests != null && !request.imsiRequests.isEmpty()) {
+                ImsiRequest imsiRequest = request.imsiRequests.get(0);
+                imsi = imsiRequest != null ? imsiRequest.imsi : null;
+                msisdn = imsiRequest != null ? imsiRequest.msisdn : null;
+                Log.d(TAG, "  ImsiRequest: imsi=" + redact(imsi) + ", msisdn=" + msisdn);
+            }
+
+            if (phoneNumber == null || phoneNumber.isEmpty() || !phoneNumber.startsWith("+")) {
+                if (msisdn != null && msisdn.startsWith("+")) {
+                    Log.d(TAG, "  Phone number missing or non-E164, using MSISDN from ImsiRequest");
+                    phoneNumber = msisdn;
+                } else {
+                    Log.d(TAG, "  Phone number missing or non-E164, forcing SIM lookup");
+                    phoneNumber = getPhoneNumberFromSim(subId);
+                    Log.d(TAG, "  Phone number from SIM (fallback): " + phoneNumber);
+                }
+            }
+
+            Ts43Client.EntitlementResult entitlement = ts43Client.performEntitlementCheckResult(subId, phoneNumber, imsi, msisdn);
+            
+            // If TS.43 is not available (e.g. Jibe carrier), try Google Constellation
+            if (entitlement.ineligible) {
+                Log.i(TAG, "TS.43 ineligible, trying Google Constellation...");
+                GoogleConstellationClient googleClient = new GoogleConstellationClient(context);
+                // Use phoneNumber if available, otherwise msisdn from ImsiRequest
+                String targetNumber = phoneNumber != null ? phoneNumber : msisdn;
+                entitlement = googleClient.verifyPhoneNumber(targetNumber, imsi);
+            }
+
+            String token = entitlement.token;
+            boolean usedStub = entitlement.stub;
+            boolean upiIneligible = entitlement.ineligible;
+            String reason = entitlement.reason;
             if (token == null) {
                 // Fallback to fake JWT for edge cases (SocketTimeout, generic IOException)
                 token = ts43Client.generateStubToken();
+                usedStub = true;
+                reason = "fallback-null";
                 Log.w(TAG, "TS.43 returned null, using fallback fake JWT token");
             }
 
+            // Return STATUS_INELIGIBLE for Jibe carriers without TS.43
+            // This triggers Messages to use "UpiIneligibleMsisdnToken" constant (doni.java:301-302)
+            // when upi_enabled_state is 5 or 6
+            int verificationStatus;
+            if (upiIneligible) {
+                verificationStatus = PhoneNumberVerification.STATUS_INELIGIBLE;
+                Log.i(TAG, "Returning verificationStatus=8 (INELIGIBLE) with magic token to trigger UpiIneligibleMsisdnToken (reason=" + reason + ")");
+            } else if (usedStub) {
+                verificationStatus = PhoneNumberVerification.STATUS_VERIFIED;
+                Log.i(TAG, "Returning verificationStatus=1 (VERIFIED) with stub token (reason=" + reason + ")");
+            } else {
+                verificationStatus = PhoneNumberVerification.STATUS_VERIFIED;
+                Log.i(TAG, "Returning verificationStatus=1 (VERIFIED) with real TS.43 token");
+            }
+
+            // Timestamps must be in SECONDS, not milliseconds!
+            long nowSeconds = System.currentTimeMillis() / 1000L;
+            long expirationSeconds = nowSeconds + (VERIFICATION_TTL_MS / 1000L);
+            
             PhoneNumberVerification verification = new PhoneNumberVerification(
                 phoneNumber,
-                System.currentTimeMillis(),
+                nowSeconds,  // timestamp in seconds
                 PhoneNumberVerification.METHOD_TS43,
                 PhoneNumberVerification.ERROR_NONE,
                 token,
                 new Bundle(),
-                PhoneNumberVerification.STATUS_VERIFIED,
-                System.currentTimeMillis() + 86400000
+                verificationStatus,
+                expirationSeconds  // expiration in seconds
             );
             
             PhoneNumberVerification[] verifications = new PhoneNumberVerification[] { verification };
@@ -225,24 +277,48 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
                 response,
                 ApiMetadata.DEFAULT
             );
-            Log.i(TAG, "verifyPhoneNumber() completed - returned STUB verified response for: " + phoneNumber);
-            Log.w(TAG, "NOTE: This is a STUB token - real implementation needs TS.43 EAP-AKA");
+            if (upiIneligible) {
+                Log.i(TAG, "verifyPhoneNumber() completed - returned ineligible response for: " + phoneNumber);
+            } else if (usedStub) {
+                Log.i(TAG, "verifyPhoneNumber() completed - returned verified response with stub token for: " + phoneNumber);
+            } else {
+                Log.i(TAG, "verifyPhoneNumber() completed - returned verified response for: " + phoneNumber);
+            }
         } catch (Exception e) {
             Log.e(TAG, "verifyPhoneNumber() failed", e);
-            callbacks.onPhoneNumberVerificationsCompleted(
-                new Status(CommonStatusCodes.INTERNAL_ERROR, e.getMessage()),
+            // Return a failure status, not an exception
+            PhoneNumberVerification failedVerification = new PhoneNumberVerification(
+                request != null ? request.phoneNumber : null,
+                System.currentTimeMillis(),
+                PhoneNumberVerification.METHOD_TS43,
+                PhoneNumberVerification.ERROR_NONE,
                 null,
+                new Bundle(),
+                PhoneNumberVerification.STATUS_NON_RETRYABLE_FAILURE,
+                0
+            );
+            VerifyPhoneNumberResponse failedResponse = new VerifyPhoneNumberResponse(
+                new PhoneNumberVerification[] { failedVerification },
+                new Bundle()
+            );
+            callbacks.onPhoneNumberVerificationsCompleted(
+                Status.SUCCESS,
+                failedResponse,
                 ApiMetadata.DEFAULT
             );
         }
     }
 
+    private String redact(String value) {
+        if (value == null || value.length() < 6) return "<redacted>";
+        return value.substring(0, 3) + "..." + value.substring(value.length() - 3);
+    }
+
     /**
      * Get Instance ID token.
      * Transaction code 4.
-     *
-     * This is used for push notifications and device identification.
      */
+
     @Override
     public void getIidToken(IConstellationCallbacks callbacks, GetIidTokenRequest request, ApiMetadata metadata) throws RemoteException {
         Log.i(TAG, "getIidToken() called");
@@ -252,12 +328,15 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
         Log.d(TAG, "  metadata: " + metadata);
 
         try {
+            // Timestamps must be in SECONDS, not milliseconds!
+            long expirationSeconds = (System.currentTimeMillis() / 1000L) + (VERIFICATION_TTL_MS / 1000L);
+            
             // Return a stub IID token
             GetIidTokenResponse response = new GetIidTokenResponse(
                 "STUB_IID_TOKEN",      // token
                 "com.google.android.apps.messaging",  // audience
                 null,                   // signature
-                System.currentTimeMillis() + 86400000  // expirationTime
+                expirationSeconds  // expirationTime in seconds
             );
             
             callbacks.onIidTokenGenerated(
