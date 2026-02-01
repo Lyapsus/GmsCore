@@ -6,6 +6,7 @@
 package org.microg.gms.constellation;
 
 import android.content.Context;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.RemoteException;
@@ -118,30 +119,53 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
      */
     private String getPhoneNumberFromSim(int subId) {
         try {
+            SubscriptionManager sm = (SubscriptionManager) context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
+
+            // API 33+: Use SubscriptionManager.getPhoneNumber(subId)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (sm != null) {
+                    // Try specific subId first
+                    if (subId > 0) {
+                        String number = sm.getPhoneNumber(subId);
+                        if (number != null && !number.isEmpty()) {
+                            return number;
+                        }
+                    }
+                    // Fallback to default subscription
+                    int defaultSubId = SubscriptionManager.getDefaultSubscriptionId();
+                    if (defaultSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                        String number = sm.getPhoneNumber(defaultSubId);
+                        if (number != null && !number.isEmpty()) {
+                            return number;
+                        }
+                    }
+                }
+            }
+
+            // API < 33: Use deprecated but functional APIs
             TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
-            if (tm == null) return null;
-            
-            // If specific subId, try to get that SIM's number
-            if (subId > 0) {
-                TelephonyManager tmSub = tm.createForSubscriptionId(subId);
-                String number = tmSub.getLine1Number();
+            if (tm != null) {
+                if (subId > 0) {
+                    TelephonyManager tmSub = tm.createForSubscriptionId(subId);
+                    @SuppressWarnings("deprecation")
+                    String number = tmSub.getLine1Number();
+                    if (number != null && !number.isEmpty()) {
+                        return number;
+                    }
+                }
+                @SuppressWarnings("deprecation")
+                String number = tm.getLine1Number();
                 if (number != null && !number.isEmpty()) {
                     return number;
                 }
             }
-            
-            // Fallback to default SIM
-            String number = tm.getLine1Number();
-            if (number != null && !number.isEmpty()) {
-                return number;
-            }
-            
-            // Try SubscriptionManager
-            SubscriptionManager sm = (SubscriptionManager) context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
+
+            // Last resort: iterate subscriptions
             if (sm != null) {
                 List<SubscriptionInfo> subs = sm.getActiveSubscriptionInfoList();
                 if (subs != null && !subs.isEmpty()) {
                     for (SubscriptionInfo sub : subs) {
+                        @SuppressWarnings("deprecation")
                         String subNumber = sub.getNumber();
                         if (subNumber != null && !subNumber.isEmpty()) {
                             return subNumber;
@@ -222,9 +246,16 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             if (entitlement.ineligible) {
                 Log.i(TAG, "TS.43 ineligible, trying Google Constellation...");
                 GoogleConstellationClient googleClient = new GoogleConstellationClient(context);
-                // Use phoneNumber if available, otherwise msisdn from ImsiRequest
-                String targetNumber = phoneNumber != null ? phoneNumber : msisdn;
-                entitlement = googleClient.verifyPhoneNumber(targetNumber, imsi);
+                String callingPackage = null;
+                try {
+                    String[] packages = context.getPackageManager().getPackagesForUid(android.os.Binder.getCallingUid());
+                    if (packages != null && packages.length > 0) {
+                        callingPackage = packages[0];
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to resolve calling package", e);
+                }
+                entitlement = googleClient.verifyPhoneNumber(request, callingPackage, imsi, msisdn);
             }
 
             String token = entitlement.token;

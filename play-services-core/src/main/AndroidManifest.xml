@@ -444,6 +444,16 @@
             </intent-filter>
         </service>
 
+        <!-- Asterism (Consent Management for RCS) -->
+
+        <service android:name="org.microg.gms.asterism.AsterismService">
+            <intent-filter>
+                <action android:name="com.google.android.gms.asterism.service.START" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </service>
+
         <!-- People -->
 
         <service android:name="org.microg.gms.people.PeopleService">
@@ -1213,7 +1223,6 @@
                 <action android:name="com.google.android.gms.ads.service.HTTP" />
                 <action android:name="com.google.android.gms.appstate.service.START" />
                 <action android:name="com.google.android.gms.appusage.service.START" />
-                <action android:name="com.google.android.gms.asterism.service.START" />
                 <action android:name="com.google.android.gms.audiomodem.service.AudioModemService.START" />
                 <action android:name="com.google.android.gms.auth.account.authapi.START" />
                 <action android:name="com.google.android.gms.auth.account.authenticator.auto.service.START" />

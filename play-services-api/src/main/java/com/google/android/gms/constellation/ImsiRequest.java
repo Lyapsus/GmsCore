@@ -16,19 +16,19 @@ import com.google.android.gms.common.internal.safeparcel.SafeParcelableCreatorAn
  *
  * Fields (from GMS decompilation):
  * - imsi: IMSI string
- * - simOperator: SIM operator string (e.g., MCCMNC)
+ * - msisdn: MSISDN/phone number (E.164 string)
  */
 @SafeParcelable.Class
 public class ImsiRequest extends AbstractSafeParcelable {
     @Field(1)
     public String imsi;
     @Field(2)
-    public String simOperator;
+    public String msisdn;
 
     @Constructor
-    public ImsiRequest(@Param(1) String imsi, @Param(2) String simOperator) {
+    public ImsiRequest(@Param(1) String imsi, @Param(2) String msisdn) {
         this.imsi = imsi;
-        this.simOperator = simOperator;
+        this.msisdn = msisdn;
     }
 
     @Override

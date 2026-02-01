@@ -49,6 +49,11 @@ public class Ts43ClientTest {
             }
 
             @Override
+            public String getSimOperator() {
+                return "12345";
+            }
+
+            @Override
             public String getSubscriberId() {
                 return "123456789012345";
             }
@@ -101,6 +106,7 @@ public class Ts43ClientTest {
         Ts43Client client = new Ts43Client(null, simAuthProvider, base64Decoder, logger);
 
         // Construct EAP-AKA Challenge Packet
+
         // Header: Code=1, ID=1, Len=48 (0x0030), Type=23, Subtype=1, Res=0
         byte[] header = new byte[] { 0x01, 0x01, 0x00, 0x30, 0x17, 0x01, 0x00, 0x00 };
         
@@ -126,7 +132,7 @@ public class Ts43ClientTest {
         String nonce = java.util.Base64.getEncoder().encodeToString(packet);
         String challenge = "EAP-AKA realm=\"example.com\", nonce=\"" + nonce + "\"";
 
-        String response = client.handleEapAkaChallenge(1, challenge);
+        String response = client.handleEapAkaChallenge(1, challenge, "123456789012345", "12345");
         
         assertNotNull(response);
         assertTrue(response.startsWith("EAP-AKA response=\""));

@@ -28,6 +28,19 @@ class PhenotypeService : BaseService(TAG, GmsService.PHENOTYPE) {
     }
 }
 
+private val RCS_PROVISIONING_FLAGS = arrayOf(
+    Flag("RcsProvisioning__min_gmscore_version_for_upi_without_acs_fallback_met", true, 0),
+    Flag("RcsProvisioning__allow_manual_phone_number_input", true, 0),
+    Flag("RcsFlags__acs_url", "https://config.rcs.mnc017.mcc232.jibecloud.net/", 0),  // Spusu ACS URL
+    // DISABLED: Force Non-UPI (GSMA OTP) path for RCS provisioning
+    // UPI path blocks empty tokens and requires Constellation JWT which we can't generate
+    // Non-UPI path uses standard GSMA OTP flow with empty token - this is what phhusson's script uses
+    Flag("RcsProvisioning__enable_upi", false, 0),
+    Flag("RcsProvisioning__enable_upi_mvp", false, 0),
+    Flag("RcsProvisioning__enable_client_attestation_check", false, 0),
+    Flag("RcsProvisioning__enable_client_attestation_check_v2", false, 0),
+)
+
 private val CONFIGURATION_OPTIONS = mapOf(
     "com.google.android.apps.search.assistant.mobile.user#com.google.android.googlequicksearchbox" to arrayOf(
         // Enable Gemini voice input for all devices
@@ -75,6 +88,11 @@ private val CONFIGURATION_OPTIONS = mapOf(
         Flag("45668769", true, 0),
         Flag("45633067", true, 0),
     ),
+    "com.google.android.apps.messaging" to RCS_PROVISIONING_FLAGS,
+    "com.google.android.apps.messaging#com.google.android.apps.messaging" to RCS_PROVISIONING_FLAGS,
+    "com.google.android.ims.library" to RCS_PROVISIONING_FLAGS,
+    "com.google.android.ims.library#com.google.android.apps.messaging" to RCS_PROVISIONING_FLAGS,
+    "com.google.android.ims.library#com.google.android.ims" to RCS_PROVISIONING_FLAGS,
 )
 
 class PhenotypeServiceImpl(val packageName: String?) : IPhenotypeService.Stub() {
@@ -129,9 +147,11 @@ class PhenotypeServiceImpl(val packageName: String?) : IPhenotypeService.Stub() 
     override fun getConfigurationSnapshotWithToken(callbacks: IPhenotypeCallbacks, packageName: String?, user: String?, p3: String?) {
         Log.d(TAG, "getConfigurationSnapshotWithToken($packageName, $user, $p3)")
         if (packageName in CONFIGURATION_OPTIONS.keys) {
+            val flags = CONFIGURATION_OPTIONS[packageName]
+            Log.d(TAG, "Serving ${flags?.size ?: 0} phenotype flags for $packageName")
             callbacks.onConfiguration(Status.SUCCESS, configurationsResult(arrayOf(Configuration().apply {
                 id = 0
-                flags = CONFIGURATION_OPTIONS[packageName]
+                this.flags = flags
                 removeNames = emptyArray()
             })))
         } else {

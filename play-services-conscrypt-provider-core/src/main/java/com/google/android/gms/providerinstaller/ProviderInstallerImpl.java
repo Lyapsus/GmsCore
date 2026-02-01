@@ -132,15 +132,24 @@ public class ProviderInstallerImpl {
             String path = "lib/" + primaryCpuAbi + "/libconscrypt_gmscore_jni.so";
             File cacheFile = new File(context.createPackageContext(packageName, 0).getCacheDir().getAbsolutePath() + "/.gmscore/" + path);
             cacheFile.getParentFile().mkdirs();
-            File apkFile = new File(context.getPackageCodePath());
+            
+            // FIX: Get GmsCore's APK path, not the calling app's APK
+            // context.getPackageCodePath() returns the calling app (e.g., Messages), but
+            // libconscrypt_gmscore_jni.so is in GmsCore's APK
+            ApplicationInfo gmsInfo = context.getPackageManager().getApplicationInfo("com.google.android.gms", 0);
+            File apkFile = new File(gmsInfo.sourceDir);
+            Log.d(TAG, "Loading conscrypt from GmsCore APK: " + apkFile.getPath());
+            
             if (!cacheFile.exists() || cacheFile.lastModified() < apkFile.lastModified()) {
                 ZipFile zipFile = new ZipFile(apkFile);
                 ZipEntry entry = zipFile.getEntry(path);
                 if (entry != null) {
                     copyInputStream(zipFile.getInputStream(entry), new FileOutputStream(cacheFile));
+                    Log.d(TAG, "Extracted native library to: " + cacheFile.getPath());
                 } else {
                     Log.d(TAG, "Can't load native library: " + path + " does not exist in " + apkFile);
                 }
+                zipFile.close();
             }
             Log.d(TAG, "Loading conscrypt_gmscore_jni from " + cacheFile.getPath());
             System.load(cacheFile.getAbsolutePath());

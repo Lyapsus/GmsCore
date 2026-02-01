@@ -79,6 +79,12 @@ public class PhoneNumberVerification extends AbstractSafeParcelable {
     // Evidence: bazj.java:287+314, bazk.java:296+387 all set g=1 for verified numbers
     // bayl.java:22-28 requires phone number when g==1 ("Invalid verifiedPhoneNumber")
     public static final int STATUS_VERIFIED = 1;  // AIDL verified (proto would be 3)
+    public static final int STATUS_UNVERIFIED = 0; // NOT_VERIFIED
+    public static final int STATUS_SMS_VERIFICATION_FAILED = 4;
+    // Messages uses status 7 as a non-retryable failure that triggers manual MSISDN fallback
+    public static final int STATUS_NON_RETRYABLE_FAILURE = 7;
+    // Messages uses status 8 to mark UPI ineligible and still sends a token
+    public static final int STATUS_INELIGIBLE = 8;
     // Other status values are less certain, but validation allows 0-10
 
     // Verification method (field 3) - from gbqb enum

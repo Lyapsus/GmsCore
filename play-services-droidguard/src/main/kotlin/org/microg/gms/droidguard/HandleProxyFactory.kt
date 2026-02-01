@@ -18,8 +18,6 @@ import java.security.cert.Certificate
 import java.util.*
 
 open class HandleProxyFactory(private val context: Context) {
-    @GuardedBy("CLASS_LOCK")
-    protected val classMap = hashMapOf<String, Class<*>>()
 
     fun createHandle(vmKey: String, pfd: ParcelFileDescriptor, extras: Bundle): HandleProxy {
         fetchFromFileDescriptor(pfd, vmKey)
@@ -112,6 +110,8 @@ open class HandleProxyFactory(private val context: Context) {
         val CLASS_LOCK = Object()
         @GuardedBy("CLASS_LOCK")
         val weakClassMap = WeakHashMap<String, Class<*>>()
+        @GuardedBy("CLASS_LOCK")
+        val classMap = hashMapOf<String, Class<*>>()
         val PROD_CERT_HASH = byteArrayOf(61, 122, 18, 35, 1, -102, -93, -99, -98, -96, -29, 67, 106, -73, -64, -119, 107, -5, 79, -74, 121, -12, -34, 95, -25, -62, 63, 50, 108, -113, -103, 74)
     }
 }
