@@ -39,8 +39,17 @@ private const val SETTINGS_PREFIX = "org.microg.gms.settings."
  */
 class SettingsProvider : ContentProvider() {
 
+    /**
+     * microG settings stored in a NAMED SharedPreferences file ("microg_settings")
+     * instead of the default prefs file ("com.google.android.gms_preferences.xml").
+     *
+     * Reason: The DroidGuard VM reads com.google.android.gms_preferences.xml via
+     * direct native syscall (openat/read). If it contains microG-specific keys like
+     * "droidguard_enabled" or "droidguard_mode", the server detects microG and rejects
+     * the token. By storing in a separate file, the default prefs file stays clean.
+     */
     private val preferences: SharedPreferences by lazy {
-        PreferenceManager.getDefaultSharedPreferences(context)
+        context!!.getSharedPreferences("microg_settings", MODE_PRIVATE)
     }
     private val checkInPrefs by lazy {
         context!!.getSharedPreferences(CheckIn.PREFERENCES_NAME, MODE_PRIVATE)
@@ -64,7 +73,49 @@ class SettingsProvider : ContentProvider() {
     }
 
     override fun onCreate(): Boolean {
+        migrateFromDefaultPrefs()
         return true
+    }
+
+    /**
+     * One-time migration: moves all microG settings from the default SharedPreferences
+     * file (com.google.android.gms_preferences.xml) to the named file (microg_settings.xml).
+     * Then clears the default prefs so the DroidGuard VM sees a stock-looking file.
+     */
+    private fun migrateFromDefaultPrefs() {
+        val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val allEntries = defaultPrefs.all
+        if (allEntries.isEmpty()) return
+
+        // Only migrate if we haven't already (check if target is empty)
+        if (preferences.all.isNotEmpty()) {
+            // Already migrated — just ensure old file is clean
+            if (allEntries.any { it.key.startsWith("droidguard_") || it.key.startsWith("checkin_") ||
+                        it.key.startsWith("gcm_") || it.key.startsWith("safetynet_") ||
+                        it.key.startsWith("device_profile") || it.key.startsWith("auth_") ||
+                        it.key.startsWith("location_") || it.key.startsWith("vending_") ||
+                        it.key.startsWith("exposure_") || it.key.startsWith("workprofile_") ||
+                        it.key.startsWith("game_") || it.key == "allow_upload_game_played" }) {
+                defaultPrefs.edit().clear().apply()
+            }
+            return
+        }
+
+        // Migrate all keys to the new named file
+        val editor = preferences.edit()
+        for ((key, value) in allEntries) {
+            when (value) {
+                is Boolean -> editor.putBoolean(key, value)
+                is String -> editor.putString(key, value)
+                is Int -> editor.putInt(key, value)
+                is Long -> editor.putLong(key, value)
+                is Float -> editor.putFloat(key, value)
+            }
+        }
+        editor.apply()
+
+        // Clear the default prefs file to hide microG keys from DG VM
+        defaultPrefs.edit().clear().apply()
     }
 
     override fun query(

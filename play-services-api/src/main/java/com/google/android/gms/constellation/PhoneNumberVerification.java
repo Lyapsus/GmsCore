@@ -23,7 +23,7 @@ import com.google.android.gms.common.internal.safeparcel.SafeParcelableCreatorAn
  * - Field 5 (e): token - JWT token for verified number (rcs_msisdn_token)
  * - Field 6 (f): extras - additional metadata bundle
  * - Field 7 (g): verificationStatus - AIDL uses 1=VERIFIED (NOT proto's 3!)
- * - Field 8 (h): expirationTime - when verification expires
+ * - Field 8 (h): retryAfterSeconds - duration in seconds until retry (0 = no delay)
  * 
  * IMPORTANT: AIDL verificationStatus values differ from proto VerificationState!
  * Proto uses: UNKNOWN=0, NONE=1, PENDING=2, VERIFIED=3
@@ -46,7 +46,7 @@ public class PhoneNumberVerification extends AbstractSafeParcelable {
     @Field(7)
     public int verificationStatus;  // Was incorrectly named errorCode
     @Field(8)
-    public long expirationTime;
+    public long retryAfterSeconds;
 
     @Constructor
     public PhoneNumberVerification(
@@ -57,7 +57,7 @@ public class PhoneNumberVerification extends AbstractSafeParcelable {
             @Param(5) String token,
             @Param(6) Bundle extras,
             @Param(7) int verificationStatus,
-            @Param(8) long expirationTime) {
+            @Param(8) long retryAfterSeconds) {
         this.phoneNumber = phoneNumber;
         this.timestamp = timestamp;
         this.verificationMethod = verificationMethod;
@@ -65,7 +65,7 @@ public class PhoneNumberVerification extends AbstractSafeParcelable {
         this.token = token;
         this.extras = extras;
         this.verificationStatus = verificationStatus;
-        this.expirationTime = expirationTime;
+        this.retryAfterSeconds = retryAfterSeconds;
     }
 
     @Override
@@ -87,16 +87,18 @@ public class PhoneNumberVerification extends AbstractSafeParcelable {
     public static final int STATUS_INELIGIBLE = 8;
     // Other status values are less certain, but validation allows 0-10
 
-    // Verification method (field 3) - from gbqb enum
-    // Evidence: gbqb.java enum definition, bayl.java:34 validation
-    public static final int METHOD_UNKNOWN = 0;       // gbqb.UNKNOWN
-    public static final int METHOD_MO_SMS = 1;        // gbqb.MO_SMS
-    public static final int METHOD_MT_SMS = 2;        // gbqb.MT_SMS
-    public static final int METHOD_CARRIER_ID = 3;    // gbqb.CARRIER_ID
-    public static final int METHOD_IMSI_LOOKUP = 5;   // gbqb.IMSI_LOOKUP
-    public static final int METHOD_REGISTERED_SMS = 7;// gbqb.REGISTERED_SMS
-    public static final int METHOD_FLASH_CALL = 8;    // gbqb.FLASH_CALL
-    public static final int METHOD_TS43 = 11;         // gbqb.TS43 (EAP-AKA)
+    // Verification method (field 3) - AIDL values
+    // Valid set from beux.java:34: {0, 1, 2, 3, 5, 7, 8, 9}
+    // NOTE: AIDL values differ from proto gbqb enum values!
+    public static final int METHOD_UNKNOWN = 0;
+    public static final int METHOD_MO_SMS = 1;
+    public static final int METHOD_MT_SMS = 2;
+    public static final int METHOD_CARRIER_ID = 3;
+    public static final int METHOD_IMSI_LOOKUP = 5;
+    public static final int METHOD_REGISTERED_SMS = 7;
+    public static final int METHOD_FLASH_CALL = 8;
+    public static final int METHOD_TS43_AIDL = 9;     // TS43 in AIDL (proto gbqb.TS43 = 11, but AIDL uses 9)
+    public static final int METHOD_TS43 = 11;         // gbqb.TS43 proto value — DO NOT use in PhoneNumberVerification
 
     // Error code (field 4) - bayl.java:15 defaults to -1, line 41 validates >= 0 or == -1
     public static final int ERROR_NONE = -1;

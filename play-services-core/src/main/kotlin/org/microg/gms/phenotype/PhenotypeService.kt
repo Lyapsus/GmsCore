@@ -32,11 +32,14 @@ private val RCS_PROVISIONING_FLAGS = arrayOf(
     Flag("RcsProvisioning__min_gmscore_version_for_upi_without_acs_fallback_met", true, 0),
     Flag("RcsProvisioning__allow_manual_phone_number_input", true, 0),
     Flag("RcsFlags__acs_url", "https://config.rcs.mnc017.mcc232.jibecloud.net/", 0),  // Spusu ACS URL
-    // DISABLED: Force Non-UPI (GSMA OTP) path for RCS provisioning
-    // UPI path blocks empty tokens and requires Constellation JWT which we can't generate
-    // Non-UPI path uses standard GSMA OTP flow with empty token - this is what phhusson's script uses
-    Flag("RcsProvisioning__enable_upi", false, 0),
-    Flag("RcsProvisioning__enable_upi_mvp", false, 0),
+    // CRITICAL: Enable the provisioning_acs_url_override file functionality
+    // Without this, Messages ignores the override file even if it exists
+    Flag("RcsFlags__allow_overrides", true, 0),
+    // ENABLED: UPI path so Messages calls our Constellation service
+    // Our service then calls Google's real API to trigger OTP SMS
+    // and get a properly signed JWT token
+    Flag("RcsProvisioning__enable_upi", true, 0),
+    Flag("RcsProvisioning__enable_upi_mvp", true, 0),
     Flag("RcsProvisioning__enable_client_attestation_check", false, 0),
     Flag("RcsProvisioning__enable_client_attestation_check_v2", false, 0),
 )

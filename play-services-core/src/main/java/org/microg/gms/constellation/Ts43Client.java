@@ -56,7 +56,6 @@ public class Ts43Client {
 
     private static final String EAP_RELAY_ACCEPT = "application/vnd.gsma.eap-relay.v1.0+json";
     private static final String NAI_FORMAT = "0%s@nai.epc.mnc%s.mcc%s.3gppnetwork.org";
-    private static final long STUB_JWT_EXP_SECONDS = 86400;
 
     private static final int NETWORK_BIND_NONE = 0;
     private static final int NETWORK_BIND_WIFI = 1;
@@ -100,31 +99,25 @@ public class Ts43Client {
 
     public static final class EntitlementResult {
         public final String token;
-        public final boolean stub;
         public final boolean ineligible;
         public final String reason;
 
-        private EntitlementResult(String token, boolean stub, boolean ineligible, String reason) {
+        private EntitlementResult(String token, boolean ineligible, String reason) {
             this.token = token;
-            this.stub = stub;
             this.ineligible = ineligible;
             this.reason = reason;
         }
 
         public static EntitlementResult success(String token) {
-            return new EntitlementResult(token, false, false, "success");
-        }
-
-        public static EntitlementResult stub(String token, String reason) {
-            return new EntitlementResult(token, true, false, reason);
+            return new EntitlementResult(token, false, "success");
         }
 
         public static EntitlementResult ineligible(String token, String reason) {
-            return new EntitlementResult(token, true, true, reason);
+            return new EntitlementResult(token, true, reason);
         }
 
         public static EntitlementResult error(String reason) {
-            return new EntitlementResult(null, false, false, reason);
+            return new EntitlementResult(null, false, reason);
         }
     }
 
@@ -283,8 +276,8 @@ public class Ts43Client {
                             logger.d(TAG, "Response body: " + responseBody);
                             String token = extractToken(responseBody);
                             if (token == null) {
-                                logger.w(TAG, "Token missing from TS.43 response, returning stub");
-                                return EntitlementResult.stub(generateStubToken(), "missing-token");
+                                logger.w(TAG, "Token missing from authenticated TS.43 response");
+                                return EntitlementResult.error("missing-token-authenticated");
                             }
                             return EntitlementResult.success(token);
                         }
@@ -295,26 +288,26 @@ public class Ts43Client {
                 String responseBody = readStream(connection.getInputStream());
                 String token = extractToken(responseBody);
                 if (token == null) {
-                    logger.w(TAG, "Token missing from TS.43 response, returning stub");
-                    return EntitlementResult.stub(generateStubToken(), "missing-token");
+                    logger.w(TAG, "Token missing from TS.43 200 response");
+                    return EntitlementResult.error("missing-token-200");
                 }
                 return EntitlementResult.success(token);
             }
 
-            logger.w(TAG, "TS.43 check failed or not implemented by carrier. Returning stub JWT.");
-            return EntitlementResult.stub(generateStubToken(), "ts43-fallback");
+            logger.w(TAG, "TS.43 check failed or not implemented by carrier (HTTP " + responseCode + ")");
+            return EntitlementResult.error("ts43-http-" + responseCode);
 
         } catch (java.net.UnknownHostException e) {
-            logger.w(TAG, "TS.43 DNS error (UnknownHost): " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning empty token.");
-            return EntitlementResult.stub(generateStubToken(), "unknown-host");
+            logger.w(TAG, "TS.43 DNS error (UnknownHost): " + e.getMessage() + ". No entitlement server.");
+            return EntitlementResult.error("unknown-host");
         } catch (java.net.ConnectException e) {
-            logger.w(TAG, "TS.43 Connection Refused: " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning empty token.");
-            return EntitlementResult.stub(generateStubToken(), "connection-refused");
+            logger.w(TAG, "TS.43 Connection Refused: " + e.getMessage() + ". No entitlement server.");
+            return EntitlementResult.error("connection-refused");
         } catch (java.io.FileNotFoundException e) {
-            logger.w(TAG, "TS.43 HTTP 404 (Not Found): " + e.getMessage() + ". Assuming Jibe carrier without entitlement server, returning empty token.");
-            return EntitlementResult.stub(generateStubToken(), "not-found");
+            logger.w(TAG, "TS.43 HTTP 404 (Not Found): " + e.getMessage() + ". No entitlement server.");
+            return EntitlementResult.error("not-found");
         } catch (java.net.SocketTimeoutException e) {
-            logger.e(TAG, "TS.43 Timeout: " + e.getMessage() + ". Network might be flaky, NOT falling back to stub.");
+            logger.e(TAG, "TS.43 Timeout: " + e.getMessage() + ". Network might be flaky; returning error.");
             return EntitlementResult.error("timeout");
         } catch (IOException e) {
             logger.e(TAG, "TS.43 generic IO error: " + e.getMessage(), e);
@@ -327,28 +320,6 @@ public class Ts43Client {
 
     public String performEntitlementCheck(int subId, String phoneNumber, String requestImsi, String requestMsisdn) {
         return performEntitlementCheckResult(subId, phoneNumber, requestImsi, requestMsisdn).token;
-    }
-
-    /**
-     * Generates a syntactically valid JWT stub token for Jibe carriers.
-     * Package-private for use by ConstellationServiceImpl fallback.
-     */
-    String generateStubToken() {
-        // Generate a syntactically valid JWT (Header.Payload.Signature)
-        // Header: {"alg":"none","typ":"JWT"}
-        // Payload: {"exp":<future>,"iat":<now>,"iss":"google"}
-        // Signature: empty
-        
-        long now = System.currentTimeMillis() / 1000;
-        long exp = now + STUB_JWT_EXP_SECONDS; // 24 hours
-        
-        String header = "{\"alg\":\"none\",\"typ\":\"JWT\"}";
-        String payload = String.format("{\"exp\":%d,\"iat\":%d,\"iss\":\"google\",\"sub\":\"stub_token_for_jibe\"}", exp, now);
-        
-        String headerB64 = base64Decoder.encodeToString(header.getBytes(StandardCharsets.UTF_8)).replace("\n", "").replace("=", "");
-        String payloadB64 = base64Decoder.encodeToString(payload.getBytes(StandardCharsets.UTF_8)).replace("\n", "").replace("=", "");
-        
-        return headerB64 + "." + payloadB64 + ".";
     }
 
     private static class SimAuthResult {

@@ -69,10 +69,12 @@ class AppCertManager(private val context: Context) {
                 val lastCheckinInfo = LastCheckinInfo.read(context)
                 val androidId = lastCheckinInfo.androidId
                 val sessionId = Random.nextLong()
+                // Stock GMS v26.02.33 version code — devicekey server validates this
+                val stockGmsVersionCode = 260233029
                 val data = hashMapOf(
                         "dg_androidId" to androidId.toString(16),
                         "dg_session" to sessionId.toString(16),
-                        "dg_gmsCoreVersion" to BuildConfig.VERSION_CODE.toString(),
+                        "dg_gmsCoreVersion" to stockGmsVersionCode.toString(),
                         "dg_sdkVersion" to Build.VERSION.SDK_INT.toString()
                 )
                 val droidGuardResult = try {
@@ -82,7 +84,7 @@ class AppCertManager(private val context: Context) {
                 }
                 val token = completeRegisterRequest(context, GcmDatabase(context), RegisterRequest().build(context)
                         .checkin(lastCheckinInfo)
-                        .app("com.google.android.gms", Constants.GMS_PACKAGE_SIGNATURE_SHA1, BuildConfig.VERSION_CODE)
+                        .app("com.google.android.gms", Constants.GMS_PACKAGE_SIGNATURE_SHA1, stockGmsVersionCode)
                         .sender(REGISTER_SENDER)
                         .extraParam("subscription", REGISTER_SUBSCRIPTION)
                         .extraParam("X-subscription", REGISTER_SUBSCRIPTION)
@@ -94,7 +96,7 @@ class AppCertManager(private val context: Context) {
                         droidGuardResult = droidGuardResult,
                         androidId = lastCheckinInfo.androidId,
                         sessionId = sessionId,
-                        versionInfo = DeviceKeyRequest.VersionInfo(Build.VERSION.SDK_INT, BuildConfig.VERSION_CODE),
+                        versionInfo = DeviceKeyRequest.VersionInfo(Build.VERSION.SDK_INT, stockGmsVersionCode),
                         token = token
                 )
                 Log.d(TAG, "Request: ${request.toString().chunked(128).joinToString("\n")}")
@@ -150,7 +152,11 @@ class AppCertManager(private val context: Context) {
     }
 
     suspend fun getSpatulaHeader(packageName: String): String? {
-        val deviceKey = deviceKey ?: if (fetchDeviceKey()) deviceKey else null
+        // Try to fetch/refresh device key. Even if fetchDeviceKey() returns false
+        // (e.g. endpoint HTTP 400), readDeviceKey() inside it may have loaded a valid
+        // key from disk. Always check the companion field after the attempt.
+        if (deviceKey == null) fetchDeviceKey()
+        val deviceKey = deviceKey
         val packageCertificateHash = context.packageManager.getCertificates(packageName).firstOrNull()?.digest("SHA1")?.toBase64(Base64.NO_WRAP)
         val proto = if (deviceKey != null) {
             val macSecret = deviceKey.macSecret?.toByteArray()

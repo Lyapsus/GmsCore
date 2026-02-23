@@ -26,8 +26,9 @@ import android.util.Log;
 public class AsterismServiceImpl extends Binder {
     private static final String TAG = "GmsAsterismSvcImpl";
 
-    // Interface descriptor (from GMS analysis)
-    private static final String DESCRIPTOR = "com.google.android.gms.asterism.internal.IAsterismService";
+    // Interface descriptor expected by clients (e.g. Google Messages).
+    // If this does not match, GmsClient aborts with "service descriptor mismatch".
+    private static final String DESCRIPTOR = "com.google.android.gms.asterism.internal.IAsterismApiService";
 
     // Transaction codes (estimated from typical AIDL patterns)
     private static final int TRANSACTION_setConsent = 1;

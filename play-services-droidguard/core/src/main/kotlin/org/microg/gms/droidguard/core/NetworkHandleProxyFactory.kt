@@ -6,6 +6,7 @@
 package org.microg.gms.droidguard.core
 
 import android.content.Context
+import android.accounts.AccountManager
 import com.android.volley.NetworkResponse
 import com.android.volley.VolleyError
 import com.android.volley.toolbox.RequestFuture
@@ -19,6 +20,7 @@ import org.microg.gms.profile.ProfileManager
 import org.microg.gms.utils.singleInstanceOf
 import java.io.File
 import java.util.*
+import java.security.MessageDigest
 import com.android.volley.Request as VolleyRequest
 import com.android.volley.Response as VolleyResponse
 
@@ -56,11 +58,58 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
     private fun readFromDatabase(flow: String?): Triple<String, ByteArray, ByteArray>? {
         ProfileManager.ensureInitialized(context)
         val id = "$flow/${version.versionString}/${Build.FINGERPRINT}"
-        return dgDb.get(id)
+        val hit = dgDb.get(id)
+        // For constellation_verify debugging, we need to know whether we're actually exercising
+        // a new server VM/bytecode or reusing a cached one.
+        if (flow == "constellation_verify") {
+            if (hit == null) {
+                android.util.Log.i("DroidGuard", "DB cache MISS for flow='$flow' id='$id'")
+            } else {
+                android.util.Log.i(
+                    "DroidGuard",
+                    "DB cache HIT for flow='$flow' id='$id': vmKey=${hit.first.take(12)}... byteCode=${hit.second.size}B extra=${hit.third.size}B"
+                )
+            }
+        }
+        return hit
     }
 
     fun createRequest(flow: String?, packageName: String, pingData: PingData? = null, extra: ByteArray? = null): Request {
         ProfileManager.ensureInitialized(context)
+
+        // Stock GMS includes whether the device already has a Google account.
+        // This may influence the VM/bytecode returned for certain high-risk flows (e.g. constellation_verify).
+        // We must not hardcode this to false.
+        val hasGoogleAccount = try {
+            val am = AccountManager.get(context)
+            am.accounts.any { it.type == "com.google" }
+        } catch (_: Throwable) {
+            false
+        }
+
+        if (flow != null) {
+            try {
+                val am = AccountManager.get(context)
+                val types = am.accounts.map { it.type }.toSet()
+                android.util.Log.d("DroidGuard", "createRequest(flow='$flow', pkg='$packageName'): hasGoogleAccount=$hasGoogleAccount accountTypes=$types")
+            } catch (_: Throwable) {
+                android.util.Log.d("DroidGuard", "createRequest(flow='$flow', pkg='$packageName'): hasGoogleAccount=$hasGoogleAccount")
+            }
+        }
+
+        val cachedKeys = getCacheDir().list()?.map { it.decodeHex() }.orEmpty()
+        val sendCachedKeys = if (flow == "constellation_verify") {
+            // For debugging we want to observe the server's full response payload (VM APK content).
+            // If we advertise cached VM keys, the server may omit content (content=0B) and we lose
+            // the ability to diff the VM/bytecode response. Constellation runs infrequently.
+            if (cachedKeys.isNotEmpty()) {
+                android.util.Log.i("DroidGuard", "createRequest(flow='$flow'): forcing cachedCount=0 (local cachedCount=${cachedKeys.size}) to force VM content")
+            }
+            emptyList()
+        } else {
+            cachedKeys
+        }
+
         return Request(
                 usage = Usage(flow, packageName),
                 info = listOf(
@@ -93,10 +142,10 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
                 ),
                 versionName = version.versionString,
                 versionCode = BuildConfig.VERSION_CODE,
-                hasAccount = false,
+                hasAccount = hasGoogleAccount,
                 isGoogleCn = false,
                 enableInlineVm = true,
-                cached = getCacheDir().list()?.map { it.decodeHex() }.orEmpty(),
+                cached = sendCachedKeys,
                 arch = System.getProperty("os.arch"),
                 ping = pingData,
                 field10 = extra?.let { of(*it) },
@@ -109,6 +158,19 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
 
     fun fetchFromServer(flow: String?, request: Request): Triple<String, ByteArray, ByteArray> {
         ProfileManager.ensureInitialized(context)
+
+        if (flow == "constellation_verify") {
+            val bodySize = try { request.encode().size } catch (_: Throwable) { -1 }
+            android.util.Log.i(
+                "DroidGuard",
+                "fetchFromServer(flow='$flow'): requestBytes=${if (bodySize >= 0) bodySize else "?"} " +
+                    "usagePkg=${request.usage?.packageName} " +
+                    "verName=${request.versionName} verCode=${request.versionCode} " +
+                    "hasAccount=${request.hasAccount} inlineVm=${request.enableInlineVm} " +
+                    "cachedCount=${request.cached?.size ?: 0} arch=${request.arch}"
+            )
+        }
+
         val future = RequestFuture.newFuture<SignedResponse>()
         queue.add(object : VolleyRequest<SignedResponse>(Method.POST, SERVER_URL, future) {
             override fun parseNetworkResponse(response: NetworkResponse): VolleyResponse<SignedResponse> {
@@ -136,7 +198,46 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
         val signed: SignedResponse = future.get()
         val response = signed.unpack()
         val vmKey = response.vmChecksum!!.hex()
+
+        if (flow == "constellation_verify") {
+            try {
+                val apkFile = getTheApkFile(vmKey)
+                val optDir = getOptDir(vmKey)
+                val cacheDir = getCacheDir(vmKey)
+                android.util.Log.i(
+                    "DroidGuard",
+                    "VM cache paths for vmKey=$vmKey: cacheDir=${cacheDir.absolutePath} apk=${apkFile.absolutePath} opt=${optDir.absolutePath} " +
+                        "exists(cacheDir=${cacheDir.exists()}, apk=${apkFile.isFile}, opt=${optDir.isDirectory})"
+                )
+            } catch (_: Throwable) {
+            }
+        }
+
+        if (flow == "constellation_verify") {
+            android.util.Log.i(
+                "DroidGuard",
+                "fetchFromServer(flow='$flow'): response vmKey=$vmKey expiryTimeSecs=${response.expiryTimeSecs} save=${response.save} " +
+                    "byteCode=${response.byteCode?.size ?: 0}B extra=${response.extra?.size ?: 0}B content=${response.content?.size ?: 0}B"
+            )
+
+            // Hashes allow comparing server payloads without dumping them.
+            try {
+                val byteCodeBytes = response.byteCode?.toByteArray() ?: ByteArray(0)
+                val contentBytes = response.content?.toByteArray() ?: ByteArray(0)
+                val extraBytes = response.extra?.toByteArray() ?: ByteArray(0)
+                android.util.Log.i(
+                    "DroidGuard",
+                    "fetchFromServer(flow='$flow'): response sha256 byteCode=${sha256Hex(byteCodeBytes).take(16)} " +
+                        "content=${sha256Hex(contentBytes).take(16)} extra=${sha256Hex(extraBytes).take(16)}"
+                )
+            } catch (_: Throwable) {
+            }
+        }
+
         if (!isValidCache(vmKey)) {
+            if (flow == "constellation_verify") {
+                android.util.Log.i("DroidGuard", "VM cache MISS for vmKey=$vmKey (no APK cached yet); writing VM APK")
+            }
             val temp = File(getCacheDir(), "${UUID.randomUUID()}.apk")
             temp.parentFile!!.mkdirs()
             temp.writeBytes(response.content!!.toByteArray())
@@ -147,6 +248,19 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
                 getCacheDir(vmKey).deleteRecursively()
                 throw IllegalStateException()
             }
+            if (flow == "constellation_verify") {
+                try {
+                    val apkFile = getTheApkFile(vmKey)
+                    val optDir = getOptDir(vmKey)
+                    android.util.Log.i(
+                        "DroidGuard",
+                        "VM cache write complete for vmKey=$vmKey: apk=${apkFile.isFile} (${apkFile.length()}B) opt=${optDir.isDirectory}"
+                    )
+                } catch (_: Throwable) {
+                }
+            }
+        } else if (flow == "constellation_verify") {
+            android.util.Log.i("DroidGuard", "VM cache HIT for vmKey=$vmKey (APK already cached)")
         }
         val id = "$flow/${version.versionString}/${Build.FINGERPRINT}"
         val expiry = (response.expiryTimeSecs ?: 0).toLong()
@@ -174,4 +288,12 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
     companion object {
         const val SERVER_URL = "https://www.googleapis.com/androidantiabuse/v1/x/create?alt=PROTO&key=AIzaSyBofcZsgLSS7BOnBjZPEkk4rYwzOIz-lTI"
     }
+}
+
+private fun sha256Hex(bytes: ByteArray): String {
+    val md = MessageDigest.getInstance("SHA-256")
+    val d = md.digest(bytes)
+    val sb = StringBuilder(d.size * 2)
+    for (b in d) sb.append(String.format("%02x", b))
+    return sb.toString()
 }

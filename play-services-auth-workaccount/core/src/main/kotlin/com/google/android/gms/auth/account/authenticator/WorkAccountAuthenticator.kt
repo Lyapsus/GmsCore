@@ -93,6 +93,8 @@ class WorkAccountAuthenticator(val context: Context) : AbstractAccountAuthentica
         oauthToken: String,
         response: AccountAuthenticatorResponse
     ) {
+        // Note: DroidGuard for auth is handled in play-services-core (AuthManager/LoginActivity)
+        // This module doesn't have access to DroidGuard, so we pass null here
         val authResponse = AuthRequest().fromContext(context)
             .appIsGms()
             .callerIsGms()

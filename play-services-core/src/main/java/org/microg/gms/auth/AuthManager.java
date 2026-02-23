@@ -11,18 +11,24 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.provider.Settings;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
+import com.google.android.gms.tasks.Tasks;
 import org.microg.gms.accountaction.ErrorResolverKt;
 import org.microg.gms.accountaction.Resolution;
+import org.microg.gms.checkin.LastCheckinInfo;
+import org.microg.gms.common.Constants;
 import org.microg.gms.common.NotOkayException;
 import org.microg.gms.common.PackageUtils;
+import org.microg.gms.droidguard.DroidGuardClientImpl;
 import org.microg.gms.settings.SettingsContract;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static android.content.pm.ApplicationInfo.FLAG_SYSTEM;
 import static android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP;
@@ -124,13 +130,19 @@ public class AuthManager {
     public boolean isPermitted() {
         if (!service.startsWith("oauth")) {
             if (context.getPackageManager().checkPermission(PERMISSION_TREE_BASE + service, packageName) == PackageManager.PERMISSION_GRANTED) {
+                Log.d(TAG, "isPermitted: YES (system permission granted)");
                 return true;
             }
         }
-        String perm = getUserData(buildPermKey());
+        String permKey = buildPermKey();
+        String perm = getUserData(permKey);
+        Log.d(TAG, "isPermitted: Checking key=" + permKey);
+        Log.d(TAG, "isPermitted: Got value=" + perm + " (need '1' to pass)");
         if (!"1".equals(perm)) {
+            Log.d(TAG, "isPermitted: NO - permission not granted or value mismatch");
             return false;
         }
+        Log.d(TAG, "isPermitted: YES - permission flag found with value=1");
         return true;
     }
 
@@ -190,11 +202,45 @@ public class AuthManager {
 
     public String getAuthToken() {
         if (service.startsWith("weblogin:")) return null;
+
+        String tokenKey = buildTokenKey();
+        Log.d(TAG, "getAuthToken: Checking for cached token (expiry check DISABLED to match stock GMS)");
+        Log.d(TAG, "  Token key: " + tokenKey);
+        Log.d(TAG, "  Package: " + packageName);
+        Log.d(TAG, "  Service: " + service);
+
+        // Stock GMS does NOT enforce local expiry timestamps (EXP: fields in AccountManager extras).
+        // Evidence (Session 89, Feb 14 2026):
+        //   - Stock GMS OAuth token expired at 13:47
+        //   - Stock GMS continued working at 14:27+ (40min past expiry)
+        //   - No auth refresh attempts observed in logs
+        //   - RCS code 2000 (working) throughout
+        // Conclusion: Google's servers validate token expiry server-side, client-side
+        // EXP: timestamps are advisory only. Stock GMS ignores them and uses tokens
+        // until server rejection occurs.
+        //
+        // microG's original expiry check caused:
+        //   - Immediate refresh attempts when swapping from stock GMS
+        //   - BadAuthentication errors (can't refresh stock GMS tokens)
+        //   - Cascading failures leading to RCS breaking after 12h
+        //
+        // By matching stock GMS behavior (ignoring local expiry), microG can use
+        // stock GMS's OAuth tokens seamlessly without triggering refresh failures.
+        // This enables proper account transfer during GMS swap.
+        /*
         if (System.currentTimeMillis() / 1000L >= getExpiry() - 300L) {
             Log.d(TAG, "token present, but expired");
             return null;
         }
-        return peekAuthToken();
+        */
+
+        String token = peekAuthToken();
+        if (token != null) {
+            Log.d(TAG, "getAuthToken: Using cached token (length=" + token.length() + "), expiry check bypassed");
+        } else {
+            Log.d(TAG, "getAuthToken: No cached token found, will request fresh");
+        }
+        return token;
     }
 
     public String buildExpireKey() {
@@ -328,6 +374,9 @@ public class AuthManager {
                 return response;
             }
         }
+        // Get DroidGuard token for auth (GMS does this - see aeoe.java:543-548)
+        String droidGuardToken = getDroidGuardForAuth();
+
         AuthRequest request = new AuthRequest().fromContext(context)
                 .source("android")
                 .app(packageName, getPackageSignature())
@@ -343,6 +392,7 @@ public class AuthManager {
                 .tokenRequestOptions(tokenRequestOptions)
                 .systemPartition(isSystemApp())
                 .hasPermission(!ignoreStoredPermission && isPermitted())
+                .droidguardResults(droidGuardToken)
                 .putDynamicFiledMap(dynamicFields);
         if (isGmsApp) {
             request.appIsGms();
@@ -363,5 +413,37 @@ public class AuthManager {
 
     public String getService() {
         return service;
+    }
+
+    /**
+     * Get DroidGuard token for auth requests.
+     * GMS uses flow "addAccount" with bindings: dg_email, dg_androidId, dg_gmsCoreVersion, dg_package
+     * See: aeho.java:21-55, aeoe.java:543-548 in GMS decompilation
+     */
+    private String getDroidGuardForAuth() {
+        try {
+            DroidGuardClientImpl droidGuard = new DroidGuardClientImpl(context);
+
+            // Build bindings matching GMS aeho.java:45-54
+            Map<String, String> bindings = new HashMap<>();
+            if (accountName != null) {
+                bindings.put("dg_email", accountName);
+            }
+            // Get Android ID like GMS does
+            String androidId = Long.toHexString(LastCheckinInfo.read(context).getAndroidId());
+            bindings.put("dg_androidId", androidId);
+            bindings.put("dg_gmsCoreVersion", String.valueOf(Constants.GMS_VERSION_CODE));
+            bindings.put("dg_package", context.getPackageName());
+
+            // Flow name from GMS: "addAccount"
+            String token = Tasks.await(droidGuard.getResults("addAccount", bindings, null), 30, TimeUnit.SECONDS);
+            if (token != null) {
+                Log.d(TAG, "Got DroidGuard token for auth (" + token.length() + " chars)");
+            }
+            return token;
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to get DroidGuard for auth", e);
+            return null;
+        }
     }
 }
