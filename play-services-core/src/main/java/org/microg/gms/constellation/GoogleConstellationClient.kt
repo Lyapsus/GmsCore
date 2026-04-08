@@ -639,7 +639,10 @@ class GoogleConstellationClient(private val context: Context) {
             }
 
             val ts43Client = Ts43Client(context)
-            val result = ts43Client.performEntitlementCheckResult(subId, phoneNumber ?: "", "", "")
+            val result = ts43Client.performEntitlementCheckResult(
+                subId, phoneNumber ?: "", "", "",
+                entitlementUrl, ts43Challenge.eap_aka_realm
+            )
             Log.i(TAG, "  TS43: result ineligible=${result.ineligible} error=${result.isError} token=${result.token?.length ?: 0} chars")
 
             if (result.isError) {

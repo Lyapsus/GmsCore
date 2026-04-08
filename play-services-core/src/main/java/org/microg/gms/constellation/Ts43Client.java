@@ -221,8 +221,27 @@ public class Ts43Client {
      * @param phoneNumber The phone number associated with the subscription.
      * @return The RCS configuration token (JWT) or null if failed.
      */
-    public EntitlementResult performEntitlementCheckResult(int subId, String phoneNumber, String requestImsi, String requestMsisdn) {
-        logger.i(TAG, "Starting TS.43 entitlement check for subId=" + subId);
+    /**
+     * Performs TS.43 entitlement check using JSON EAP relay (GSMA TS.43 v5.0+).
+     *
+     * Two-phase flow:
+     * Phase 1 - EAP-AKA auth: GET with EAP_ID → server returns {"eap-relay-packet": "base64"} →
+     *           SIM auth → POST {"eap-relay-packet": "response"} → server returns {"Token": {"token": "..."}}
+     * Phase 2 - ODSA request: GET with token param → server returns phone number or temp token
+     *
+     * @param entitlementUrl URL from Ts43Challenge.entitlement_url (server-provided, NOT CarrierConfig)
+     * @param eapAkaRealm Optional realm from Ts43Challenge.eap_aka_realm
+     */
+    public EntitlementResult performEntitlementCheckResult(int subId, String phoneNumber,
+            String requestImsi, String requestMsisdn,
+            String entitlementUrl, String eapAkaRealm) {
+        logger.i(TAG, "Starting TS.43 entitlement check for subId=" + subId + " url=" + entitlementUrl);
+
+        if (entitlementUrl == null || entitlementUrl.isEmpty()) {
+            // No entitlement URL from server - Jibe carrier without TS.43
+            logger.w(TAG, "No entitlement URL provided; returning INELIGIBLE");
+            return EntitlementResult.ineligible("", "jibe-no-ts43");
+        }
 
         Ts43SimInfo simInfo = resolveSimInfo(subId, requestImsi, requestMsisdn);
         if (simInfo == null) {
@@ -230,12 +249,6 @@ public class Ts43Client {
             return EntitlementResult.error("sim-info");
         }
 
-        if (phoneNumber == null || phoneNumber.isEmpty() || !phoneNumber.startsWith("+")) {
-            logger.w(TAG, "Phone number missing or non-E164, forcing SIM lookup (value=" + phoneNumber + ")");
-            phoneNumber = null;
-        }
-
-        // 1. Get MCC/MNC from SIM operator (NOT network operator)
         String simOperator = simInfo.simOperator;
         if (simOperator == null || simOperator.length() < 5) {
             logger.e(TAG, "Invalid SIM operator: " + simOperator);
@@ -243,103 +256,203 @@ public class Ts43Client {
         }
         String mcc = simOperator.substring(0, 3);
         String mnc = simOperator.substring(3);
-        logger.d(TAG, "Parsed MCC/MNC from SIM operator: mcc=" + mcc + ", mnc=" + mnc);
-
-        // 2. Construct Entitlement Server URL
-        // Format: https://aes.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org/cred_service
-        // Note: MNC must be 3 digits (padded with 0 if needed)
-        String mnc3 = mnc.length() == 2 ? "0" + mnc : mnc;
-        String fallbackUrl = String.format("https://aes.mnc%s.mcc%s.pub.3gppnetwork.org/cred_service", mnc3, mcc);
-        EntitlementEndpoint endpoint = resolveEntitlementUrl(subId, fallbackUrl);
-        String urlString = endpoint.url;
-        logger.d(TAG, "Entitlement URL: " + urlString + " (simOperator=" + simOperator + ")");
-        if (!endpoint.fromCarrierConfig) {
-            // For Jibe carriers without TS.43 (like Spusu):
-            // For Jibe carriers without TS.43: return INELIGIBLE with empty token
-            // This triggers Messages to use "UpiIneligibleMsisdnToken" magic constant
-            // when upi_enabled_state is 5 or 6 (which Spusu has)
-            logger.w(TAG, "CarrierConfig entitlement URL missing; returning INELIGIBLE with empty token to trigger UpiIneligibleMsisdnToken");
-            return EntitlementResult.ineligible("", "jibe-no-ts43");
+        String imsi = simInfo.imsi;
+        if (imsi == null || imsi.isEmpty()) {
+            logger.e(TAG, "IMSI missing from SIM info");
+            return EntitlementResult.error("imsi-missing");
         }
+
+        // Build EAP-AKA identity (NAI)
+        String eapId = getNai(imsi, mcc, mnc, eapAkaRealm);
 
         try {
-            // 3. Initial Request (expecting 401 Challenge)
-            HttpURLConnection connection = (HttpURLConnection) openNetworkConnection(urlString, subId);
-            connection.setConnectTimeout(TS43_TIMEOUT_MS);
-            connection.setReadTimeout(TS43_TIMEOUT_MS);
-            connection.setRequestMethod("GET");
-            connection.setRequestProperty("Accept", EAP_RELAY_ACCEPT);
-            logger.d(TAG, "Request headers: Accept=" + EAP_RELAY_ACCEPT);
-
-            int responseCode = connection.getResponseCode();
-            logger.d(TAG, "Initial response code: " + responseCode + " (url=" + urlString + ")");
-
-            if (responseCode == 401) {
-                String wwwAuthenticate = connection.getHeaderField("WWW-Authenticate");
-                logger.d(TAG, "Challenge: " + wwwAuthenticate + " (subId=" + subId + ")");
-
-                
-                if (wwwAuthenticate != null && wwwAuthenticate.contains("EAP-AKA")) {
-                    // 4. Handle EAP-AKA Challenge
-                    String challengeResponse = handleEapAkaChallenge(subId, wwwAuthenticate, simInfo.imsi, simInfo.simOperator);
-                    if (challengeResponse != null) {
-                        // 5. Authenticated Request
-                        connection.disconnect();
-                        connection = (HttpURLConnection) openNetworkConnection(urlString, subId);
-                        connection.setConnectTimeout(TS43_TIMEOUT_MS);
-                        connection.setReadTimeout(TS43_TIMEOUT_MS);
-                        connection.setRequestMethod("GET");
-                        connection.setRequestProperty("Authorization", challengeResponse);
-                        connection.setRequestProperty("Accept", EAP_RELAY_ACCEPT);
-
-                        responseCode = connection.getResponseCode();
-                        logger.d(TAG, "Authenticated response code: " + responseCode);
-                        
-                        if (responseCode == 200) {
-                            String responseBody = readStream(connection.getInputStream());
-                            logger.d(TAG, "Response body: " + responseBody);
-                            String token = extractToken(responseBody);
-                            if (token == null) {
-                                logger.w(TAG, "Token missing from authenticated TS.43 response");
-                                return EntitlementResult.error("missing-token-authenticated");
-                            }
-                            return EntitlementResult.success(token);
-                        }
-                    }
-                }
-            } else if (responseCode == 200) {
-                // Already authenticated?
-                String responseBody = readStream(connection.getInputStream());
-                String token = extractToken(responseBody);
-                if (token == null) {
-                    logger.w(TAG, "Token missing from TS.43 200 response");
-                    return EntitlementResult.error("missing-token-200");
-                }
-                return EntitlementResult.success(token);
+            // Phase 1: EAP-AKA authentication via JSON relay
+            String authToken = performEapAkaAuth(subId, entitlementUrl, eapId, imsi, simOperator);
+            if (authToken == null) {
+                logger.w(TAG, "EAP-AKA auth failed - no token obtained");
+                return EntitlementResult.error("eap-aka-auth-failed");
             }
-
-            logger.w(TAG, "TS.43 check failed or not implemented by carrier (HTTP " + responseCode + ")");
-            return EntitlementResult.error("ts43-http-" + responseCode);
+            logger.i(TAG, "EAP-AKA auth succeeded, token length=" + authToken.length());
+            return EntitlementResult.success(authToken);
 
         } catch (java.net.UnknownHostException e) {
-            logger.w(TAG, "TS.43 DNS error (UnknownHost): " + e.getMessage() + ". No entitlement server.");
+            logger.w(TAG, "TS.43 DNS error: " + e.getMessage());
             return EntitlementResult.error("unknown-host");
         } catch (java.net.ConnectException e) {
-            logger.w(TAG, "TS.43 Connection Refused: " + e.getMessage() + ". No entitlement server.");
+            logger.w(TAG, "TS.43 Connection Refused: " + e.getMessage());
             return EntitlementResult.error("connection-refused");
-        } catch (java.io.FileNotFoundException e) {
-            logger.w(TAG, "TS.43 HTTP 404 (Not Found): " + e.getMessage() + ". No entitlement server.");
-            return EntitlementResult.error("not-found");
         } catch (java.net.SocketTimeoutException e) {
-            logger.e(TAG, "TS.43 Timeout: " + e.getMessage() + ". Network might be flaky; returning error.");
+            logger.e(TAG, "TS.43 Timeout: " + e.getMessage());
             return EntitlementResult.error("timeout");
         } catch (IOException e) {
-            logger.e(TAG, "TS.43 generic IO error: " + e.getMessage(), e);
+            logger.e(TAG, "TS.43 IO error: " + e.getMessage(), e);
             return EntitlementResult.error("io-error");
         } catch (Exception e) {
-            logger.e(TAG, "TS.43 check failed with unexpected error", e);
+            logger.e(TAG, "TS.43 unexpected error", e);
             return EntitlementResult.error("unexpected");
         }
+    }
+
+    /** Legacy overload for callers without server-provided URL/realm. */
+    public EntitlementResult performEntitlementCheckResult(int subId, String phoneNumber, String requestImsi, String requestMsisdn) {
+        // Try CarrierConfig entitlement URL as fallback
+        EntitlementEndpoint endpoint = resolveEntitlementUrl(subId, null);
+        String url = (endpoint != null && endpoint.fromCarrierConfig) ? endpoint.url : null;
+        return performEntitlementCheckResult(subId, phoneNumber, requestImsi, requestMsisdn, url, null);
+    }
+
+    /**
+     * Phase 1: EAP-AKA authentication via JSON body relay.
+     * Up to 3 rounds of challenge-response with the entitlement server.
+     * Returns the authentication token on success, null on failure.
+     */
+    private String performEapAkaAuth(int subId, String entitlementUrl, String eapId,
+            String imsi, String simOperator) throws IOException {
+        // Build initial GET URL with EAP_ID parameter
+        String separator = entitlementUrl.contains("?") ? "&" : "?";
+        String initialUrl = entitlementUrl + separator + "EAP_ID=" + java.net.URLEncoder.encode(eapId, "UTF-8");
+
+        // Cookie store for session continuity
+        java.util.Map<String, String> cookies = new java.util.LinkedHashMap<>();
+
+        // Round 1: Initial GET - server returns EAP challenge in JSON body
+        HttpURLConnection conn = openNetworkConnection(initialUrl, subId);
+        conn.setConnectTimeout(TS43_TIMEOUT_MS);
+        conn.setReadTimeout(TS43_TIMEOUT_MS);
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Accept", EAP_RELAY_ACCEPT);
+        logger.d(TAG, "EAP round 1: GET " + initialUrl);
+
+        for (int round = 1; round <= 3; round++) {
+            // Apply cookies
+            if (!cookies.isEmpty()) {
+                StringBuilder cookieHeader = new StringBuilder();
+                for (java.util.Map.Entry<String, String> entry : cookies.entrySet()) {
+                    if (cookieHeader.length() > 0) cookieHeader.append("; ");
+                    cookieHeader.append(entry.getKey()).append("=").append(entry.getValue());
+                }
+                conn.setRequestProperty("Cookie", cookieHeader.toString());
+            }
+
+            int responseCode = conn.getResponseCode();
+            logger.d(TAG, "EAP round " + round + ": HTTP " + responseCode);
+
+            // Collect cookies from response
+            java.util.List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
+            if (setCookies != null) {
+                for (String sc : setCookies) {
+                    String[] parts = sc.split(";")[0].split("=", 2);
+                    if (parts.length == 2) cookies.put(parts[0].trim(), parts[1].trim());
+                }
+            }
+
+            if (responseCode != 200) {
+                logger.w(TAG, "EAP round " + round + ": unexpected HTTP " + responseCode);
+                return null;
+            }
+
+            String body = readStream(conn.getInputStream());
+            conn.disconnect();
+            logger.d(TAG, "EAP round " + round + ": body length=" + body.length());
+
+            // Check if response contains auth token (authentication complete)
+            String token = extractToken(body);
+            if (token != null) {
+                logger.i(TAG, "EAP round " + round + ": auth token received");
+                return token;
+            }
+
+            // Extract EAP relay packet for SIM auth
+            String eapRelayPacket = extractEapRelayPacket(body);
+            if (eapRelayPacket == null) {
+                logger.w(TAG, "EAP round " + round + ": no eap-relay-packet or token in response");
+                return null;
+            }
+
+            // Process EAP-AKA challenge with SIM
+            String eapResponse = processEapPacket(subId, eapRelayPacket, imsi, simOperator);
+            if (eapResponse == null) {
+                logger.e(TAG, "EAP round " + round + ": SIM auth failed");
+                return null;
+            }
+
+            // POST the EAP response back as JSON
+            conn = openNetworkConnection(entitlementUrl, subId);
+            conn.setConnectTimeout(TS43_TIMEOUT_MS);
+            conn.setReadTimeout(TS43_TIMEOUT_MS);
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Accept", EAP_RELAY_ACCEPT + ", text/vnd.wap.connectivity-xml");
+            conn.setRequestProperty("Content-Type", EAP_RELAY_ACCEPT);
+            conn.setDoOutput(true);
+
+            String postBody = "{\"eap-relay-packet\":\"" + eapResponse + "\"}";
+            logger.d(TAG, "EAP round " + round + ": POST eap-relay-packet (" + eapResponse.length() + " chars)");
+            conn.getOutputStream().write(postBody.getBytes(StandardCharsets.UTF_8));
+        }
+
+        logger.w(TAG, "EAP-AKA auth: exceeded 3 rounds without completing");
+        return null;
+    }
+
+    /** Extract eap-relay-packet from JSON body. */
+    private String extractEapRelayPacket(String body) {
+        try {
+            org.json.JSONObject json = new org.json.JSONObject(body);
+            String packet = json.optString("eap-relay-packet", null);
+            if (packet != null && !packet.isEmpty()) return packet;
+        } catch (Exception e) {
+            logger.d(TAG, "Response is not JSON EAP relay: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Process an EAP-AKA packet from JSON relay: decode base64, extract RAND/AUTN,
+     * authenticate with SIM, build response packet, return as base64.
+     */
+    private String processEapPacket(int subId, String eapRelayBase64, String imsi, String simOperator) {
+        byte[] eapPayload = base64Decoder.decode(eapRelayBase64);
+        if (eapPayload == null || eapPayload.length < 8) {
+            logger.e(TAG, "Invalid EAP packet: too short");
+            return null;
+        }
+
+        if (eapPayload[0] != 1 || eapPayload[4] != EAP_AKA_TYPE) {
+            logger.e(TAG, "Not an EAP-AKA Request: code=" + (eapPayload[0] & 0xFF) + " type=" + (eapPayload[4] & 0xFF));
+            return null;
+        }
+
+        int id = eapPayload[1] & 0xFF;
+        int subtype = eapPayload[5] & 0xFF;
+        if (subtype != EAP_AKA_SUBTYPE_CHALLENGE) {
+            logger.e(TAG, "Unexpected EAP-AKA subtype: " + subtype);
+            return null;
+        }
+
+        // Extract RAND and AUTN attributes
+        byte[] rand = null, autn = null;
+        int offset = 8;
+        while (offset + 1 < eapPayload.length) {
+            int attrType = eapPayload[offset] & 0xFF;
+            int attrLen = (eapPayload[offset + 1] & 0xFF) * 4;
+            if (attrLen < 4 || offset + attrLen > eapPayload.length) break;
+
+            if (attrType == AT_RAND) {
+                rand = new byte[16];
+                System.arraycopy(eapPayload, offset + 4, rand, 0, 16);
+            } else if (attrType == AT_AUTN) {
+                autn = new byte[16];
+                System.arraycopy(eapPayload, offset + 4, autn, 0, 16);
+            }
+            offset += attrLen;
+        }
+
+        if (rand == null || autn == null) {
+            logger.e(TAG, "Missing RAND or AUTN in EAP-AKA challenge");
+            return null;
+        }
+
+        return generateEapAkaResponse(subId, id, rand, autn, imsi, simOperator);
     }
 
     public String performEntitlementCheck(int subId, String phoneNumber, String requestImsi, String requestMsisdn) {
@@ -702,72 +815,7 @@ public class Ts43Client {
         return null;
     }
 
-    String handleEapAkaChallenge(int subId, String wwwAuthenticate, String imsi, String simOperator) {
-        logger.d(TAG, "Handling EAP-AKA challenge: " + wwwAuthenticate);
-        if (imsi == null || simOperator == null || simOperator.length() < 5) {
-            logger.e(TAG, "Missing IMSI or SIM operator for EAP-AKA");
-            return null;
-        }
-        
-        // Extract nonce (EAP payload)
-        // Header format: EAP-AKA realm="...", nonce="..."
-        Pattern p = Pattern.compile("nonce=\"([^\"]+)\"");
-        Matcher m = p.matcher(wwwAuthenticate);
-        if (!m.find()) {
-            logger.e(TAG, "No nonce found in WWW-Authenticate header");
-            return null;
-        }
-        
-        String nonceBase64 = m.group(1);
-        byte[] eapPayload = base64Decoder.decode(nonceBase64);
-        
-        // Parse EAP packet
-        if (eapPayload.length < 5 || eapPayload[0] != 1 || eapPayload[4] != EAP_AKA_TYPE) {
-            logger.e(TAG, "Invalid EAP packet");
-            return null;
-        }
-        
-        int id = eapPayload[1] & 0xFF;
-        int subtype = eapPayload[5] & 0xFF;
-        
-        if (subtype != EAP_AKA_SUBTYPE_CHALLENGE) {
-            logger.e(TAG, "Unexpected EAP-AKA subtype: " + subtype);
-            return null;
-        }
-        
-        // Extract Attributes (RAND, AUTN)
-        byte[] rand = null;
-        byte[] autn = null;
-        
-        int offset = 8; // Skip header (Code, ID, Len, Type, Subtype, Reserved)
-        while (offset < eapPayload.length) {
-            int attrType = eapPayload[offset] & 0xFF;
-            int attrLen = (eapPayload[offset + 1] & 0xFF) * 4; // Length in 4-byte words
-            
-            if (attrType == AT_RAND) {
-                rand = new byte[attrLen - 4]; // Subtract header (2 bytes) + reserved (2 bytes)
-                System.arraycopy(eapPayload, offset + 4, rand, 0, rand.length);
-            } else if (attrType == AT_AUTN) {
-                autn = new byte[attrLen - 4];
-                System.arraycopy(eapPayload, offset + 4, autn, 0, autn.length);
-            }
-            
-            offset += attrLen;
-        }
-        
-        if (rand == null || autn == null) {
-            logger.e(TAG, "Missing RAND or AUTN in EAP-AKA challenge");
-            return null;
-        }
-        
-        // Calculate Response using SIM
-        String eapResponse = generateEapAkaResponse(subId, id, rand, autn, imsi, simOperator);
-        if (eapResponse == null) {
-            return null;
-        }
-        
-        return "EAP-AKA response=\"" + eapResponse + "\"";
-    }
+    // handleEapAkaChallenge removed - replaced by processEapPacket + JSON relay flow
 
     /**
      * Generates the EAP-AKA response packet (Base64 encoded).
@@ -944,14 +992,30 @@ public class Ts43Client {
 
 
     private String extractToken(String responseBody) {
-        // Simple regex to find token in JSON/XML
-        // JSON: "token": "..."
-        // XML: <token>...</token>
-        Pattern p = Pattern.compile("\"token\"\\s*:\\s*\"([^\"]+)\"|<token>([^<]+)</token>");
-        Matcher m = p.matcher(responseBody);
-        if (m.find()) {
-            return m.group(1) != null ? m.group(1) : m.group(2);
-        }
+        // Try JSON: {"Token": {"token": "..."}} (standard GSMA TS.43 response)
+        try {
+            org.json.JSONObject json = new org.json.JSONObject(responseBody);
+            org.json.JSONObject tokenObj = json.optJSONObject("Token");
+            if (tokenObj != null) {
+                String token = tokenObj.optString("token", null);
+                if (token != null && !token.isEmpty()) return token;
+            }
+        } catch (Exception ignored) {}
+
+        // Try OMA DM XML: <parm name="token" value="..."/>
+        try {
+            Pattern p = Pattern.compile("<parm[^>]+name=\"token\"[^>]+value=\"([^\"]+)\"");
+            Matcher m = p.matcher(responseBody);
+            if (m.find()) return m.group(1);
+        } catch (Exception ignored) {}
+
+        // Fallback: simple JSON key
+        try {
+            Pattern p = Pattern.compile("\"token\"\\s*:\\s*\"([^\"]+)\"");
+            Matcher m = p.matcher(responseBody);
+            if (m.find()) return m.group(1);
+        } catch (Exception ignored) {}
+
         return null;
     }
 
