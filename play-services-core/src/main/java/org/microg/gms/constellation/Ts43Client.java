@@ -267,7 +267,7 @@ public class Ts43Client {
 
         try {
             // Phase 1: EAP-AKA authentication via JSON relay
-            String authToken = performEapAkaAuth(subId, entitlementUrl, eapId, imsi, simOperator);
+            String authToken = performEapAkaAuth(subId, entitlementUrl, eapId, imsi, simOperator, eapAkaRealm);
             if (authToken == null) {
                 logger.w(TAG, "EAP-AKA auth failed - no token obtained");
                 return EntitlementResult.error("eap-aka-auth-failed");
@@ -317,7 +317,7 @@ public class Ts43Client {
      * Returns the authentication token on success, null on failure.
      */
     private String performEapAkaAuth(int subId, String entitlementUrl, String eapId,
-            String imsi, String simOperator) throws IOException {
+            String imsi, String simOperator, String eapAkaRealm) throws IOException {
         // Build initial GET URL with EAP_ID parameter
         String separator = entitlementUrl.contains("?") ? "&" : "?";
         String initialUrl = entitlementUrl + separator + "EAP_ID=" + java.net.URLEncoder.encode(eapId, "UTF-8");
@@ -333,56 +333,52 @@ public class Ts43Client {
         conn.setRequestProperty("Accept", EAP_RELAY_ACCEPT);
         logger.d(TAG, "EAP round 1: GET " + initialUrl);
 
-        for (int round = 1; round <= 3; round++) {
-            // Apply cookies
-            if (!cookies.isEmpty()) {
-                StringBuilder cookieHeader = new StringBuilder();
-                for (java.util.Map.Entry<String, String> entry : cookies.entrySet()) {
-                    if (cookieHeader.length() > 0) cookieHeader.append("; ");
-                    cookieHeader.append(entry.getKey()).append("=").append(entry.getValue());
-                }
-                conn.setRequestProperty("Cookie", cookieHeader.toString());
-            }
+        // EAP relay loop: read response, process challenge, POST back, repeat.
+        // Max 3 challenge-response exchanges before giving up.
+        int postsRemaining = 3;
+        while (true) {
+            // Apply cookies to current connection
+            applyCookies(conn, cookies);
 
             int responseCode = conn.getResponseCode();
-            logger.d(TAG, "EAP round " + round + ": HTTP " + responseCode);
+            logger.d(TAG, "EAP: HTTP " + responseCode + " (postsRemaining=" + postsRemaining + ")");
 
             // Collect cookies from response
-            java.util.List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
-            if (setCookies != null) {
-                for (String sc : setCookies) {
-                    String[] parts = sc.split(";")[0].split("=", 2);
-                    if (parts.length == 2) cookies.put(parts[0].trim(), parts[1].trim());
-                }
-            }
+            collectCookies(conn, cookies);
 
             if (responseCode != 200) {
-                logger.w(TAG, "EAP round " + round + ": unexpected HTTP " + responseCode);
+                logger.w(TAG, "EAP: unexpected HTTP " + responseCode);
+                conn.disconnect();
                 return null;
             }
 
             String body = readStream(conn.getInputStream());
             conn.disconnect();
-            logger.d(TAG, "EAP round " + round + ": body length=" + body.length());
+            logger.d(TAG, "EAP: body length=" + body.length());
 
             // Check if response contains auth token (authentication complete)
             String token = extractToken(body);
             if (token != null) {
-                logger.i(TAG, "EAP round " + round + ": auth token received");
+                logger.i(TAG, "EAP: auth token received");
                 return token;
+            }
+
+            if (postsRemaining <= 0) {
+                logger.w(TAG, "EAP-AKA auth: exceeded max rounds without completing");
+                return null;
             }
 
             // Extract EAP relay packet for SIM auth
             String eapRelayPacket = extractEapRelayPacket(body);
             if (eapRelayPacket == null) {
-                logger.w(TAG, "EAP round " + round + ": no eap-relay-packet or token in response");
+                logger.w(TAG, "EAP: no eap-relay-packet or token in response");
                 return null;
             }
 
             // Process EAP-AKA challenge with SIM
-            String eapResponse = processEapPacket(subId, eapRelayPacket, imsi, simOperator);
+            String eapResponse = processEapPacket(subId, eapRelayPacket, imsi, simOperator, eapAkaRealm);
             if (eapResponse == null) {
-                logger.e(TAG, "EAP round " + round + ": SIM auth failed");
+                logger.e(TAG, "EAP: SIM auth failed");
                 return null;
             }
 
@@ -394,23 +390,14 @@ public class Ts43Client {
             conn.setRequestProperty("Accept", EAP_RELAY_ACCEPT + ", text/vnd.wap.connectivity-xml");
             conn.setRequestProperty("Content-Type", EAP_RELAY_ACCEPT);
             conn.setDoOutput(true);
-            // Apply cookies to POST connection
-            if (!cookies.isEmpty()) {
-                StringBuilder cookieHeader = new StringBuilder();
-                for (java.util.Map.Entry<String, String> entry : cookies.entrySet()) {
-                    if (cookieHeader.length() > 0) cookieHeader.append("; ");
-                    cookieHeader.append(entry.getKey()).append("=").append(entry.getValue());
-                }
-                conn.setRequestProperty("Cookie", cookieHeader.toString());
-            }
+            applyCookies(conn, cookies);
 
             String postBody = "{\"eap-relay-packet\":\"" + eapResponse + "\"}";
-            logger.d(TAG, "EAP round " + round + ": POST eap-relay-packet (" + eapResponse.length() + " chars)");
+            logger.d(TAG, "EAP: POST eap-relay-packet (" + eapResponse.length() + " chars)");
             conn.getOutputStream().write(postBody.getBytes(StandardCharsets.UTF_8));
+            postsRemaining--;
+            // Loop back to read POST response at top
         }
-
-        logger.w(TAG, "EAP-AKA auth: exceeded 3 rounds without completing");
-        return null;
     }
 
     /**
@@ -450,6 +437,27 @@ public class Ts43Client {
         }
     }
 
+    private void applyCookies(HttpURLConnection conn, java.util.Map<String, String> cookies) {
+        if (!cookies.isEmpty()) {
+            StringBuilder cookieHeader = new StringBuilder();
+            for (java.util.Map.Entry<String, String> entry : cookies.entrySet()) {
+                if (cookieHeader.length() > 0) cookieHeader.append("; ");
+                cookieHeader.append(entry.getKey()).append("=").append(entry.getValue());
+            }
+            conn.setRequestProperty("Cookie", cookieHeader.toString());
+        }
+    }
+
+    private void collectCookies(HttpURLConnection conn, java.util.Map<String, String> cookies) {
+        java.util.List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
+        if (setCookies != null) {
+            for (String sc : setCookies) {
+                String[] parts = sc.split(";")[0].split("=", 2);
+                if (parts.length == 2) cookies.put(parts[0].trim(), parts[1].trim());
+            }
+        }
+    }
+
     /** Extract eap-relay-packet from JSON body. */
     private String extractEapRelayPacket(String body) {
         try {
@@ -466,7 +474,8 @@ public class Ts43Client {
      * Process an EAP-AKA packet from JSON relay: decode base64, extract RAND/AUTN,
      * authenticate with SIM, build response packet, return as base64.
      */
-    private String processEapPacket(int subId, String eapRelayBase64, String imsi, String simOperator) {
+    // Package-private for testing
+    String processEapPacket(int subId, String eapRelayBase64, String imsi, String simOperator, String eapAkaRealm) {
         byte[] eapPayload = base64Decoder.decode(eapRelayBase64);
         if (eapPayload == null || eapPayload.length < 8) {
             logger.e(TAG, "Invalid EAP packet: too short");
@@ -508,7 +517,7 @@ public class Ts43Client {
             return null;
         }
 
-        return generateEapAkaResponse(subId, id, rand, autn, imsi, simOperator);
+        return generateEapAkaResponse(subId, id, rand, autn, imsi, simOperator, eapAkaRealm);
     }
 
     public String performEntitlementCheck(int subId, String phoneNumber, String requestImsi, String requestMsisdn) {
@@ -876,7 +885,7 @@ public class Ts43Client {
     /**
      * Generates the EAP-AKA response packet (Base64 encoded).
      */
-    private String generateEapAkaResponse(int subId, int id, byte[] rand, byte[] autn, String imsi, String simOperator) {
+    private String generateEapAkaResponse(int subId, int id, byte[] rand, byte[] autn, String imsi, String simOperator, String eapAkaRealm) {
         // 1. Get SIM Authentication
         // Input format for getIccAuthentication:
         // Length of RAND (1 byte) + RAND + Length of AUTN (1 byte) + AUTN
@@ -937,11 +946,12 @@ public class Ts43Client {
         }
         String mcc = simOperator.substring(0, 3);
         String mnc = simOperator.substring(3);
-        String identity = getNai(imsi, mcc, mnc, null);
+        String identity = getNai(imsi, mcc, mnc, eapAkaRealm);
 
-        byte[] mkInput = new byte[identity.length() + authResult.ik.length + authResult.ck.length];
+        byte[] identityBytes = identity.getBytes(StandardCharsets.UTF_8);
+        byte[] mkInput = new byte[identityBytes.length + authResult.ik.length + authResult.ck.length];
         int pos = 0;
-        System.arraycopy(identity.getBytes(StandardCharsets.UTF_8), 0, mkInput, pos, identity.length()); pos += identity.length();
+        System.arraycopy(identityBytes, 0, mkInput, pos, identityBytes.length); pos += identityBytes.length;
         System.arraycopy(authResult.ik, 0, mkInput, pos, authResult.ik.length); pos += authResult.ik.length;
         System.arraycopy(authResult.ck, 0, mkInput, pos, authResult.ck.length);
 
