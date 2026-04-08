@@ -109,12 +109,6 @@ open class HandleProxyFactory(private val context: Context) {
                 android.util.Log.w("HandleProxyFactory", "DEBUG WAIT: resuming")
             }
 
-            // Force ART to load 4 DEX files it normally skips (6,8,11,15).
-            // Stock GMS has 17 dalvik-classes regions in maps; we have 13 because ART
-            // doesn't load DEX whose classes aren't referenced. Loading one class from
-            // each triggers ART to extract and mmap the DEX.
-            forceLoadSkippedDex(context)
-
             // Pre-spoof process-level signals: ApplicationInfo, snet_shared_uuid, pif.prop
             DgSpoofContext.prespoofProcessInfo(context)
 
@@ -170,36 +164,6 @@ open class HandleProxyFactory(private val context: Context) {
         val weakClassMap = WeakHashMap<String, Class<*>>()
         @GuardedBy("CLASS_LOCK")
         val classMap = hashMapOf<String, Class<*>>()
-        /**
-         * Force ART to load DEX files it normally skips.
-         * Stock GMS shows 17 dalvik-classes regions in /proc/self/maps.
-         * ART skips DEX whose classes aren't referenced by running code.
-         * Loading one class from each skipped DEX triggers ART extraction.
-         */
-        @Volatile private var dexForceLoaded = false
-        fun forceLoadSkippedDex(context: Context) {
-            if (dexForceLoaded) return
-            dexForceLoaded = true
-            // One class from each of the 4 DEX files ART skips (6,8,11,15)
-            // These are stock GMS classes present in the hybrid APK.
-            val targets = arrayOf(
-                "an.\$\$ExternalSyntheticApiModelOutline0",                           // classes6
-                "com.google.android.gms.nearby.sharing.AdvertisingOptions",           // classes8
-                "com.google.android.libraries.barhopper.Barcode",                     // classes11
-                "j\$.net.URLDecoder",                                                 // classes15
-            )
-            var loaded = 0
-            for (name in targets) {
-                try {
-                    Class.forName(name, false, context.classLoader)
-                    loaded++
-                } catch (_: ClassNotFoundException) {
-                    // Expected if class not in our APK — only matters for hybrid APK
-                }
-            }
-            android.util.Log.i("HandleProxyFactory", "Force-loaded $loaded/${targets.size} DEX trigger classes")
-        }
-
         val PROD_CERT_HASH = byteArrayOf(61, 122, 18, 35, 1, -102, -93, -99, -98, -96, -29, 67, 106, -73, -64, -119, 107, -5, 79, -74, 121, -12, -34, 95, -25, -62, 63, 50, 108, -113, -103, 74)
 
 
