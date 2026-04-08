@@ -112,34 +112,6 @@ open class HandleProxyFactory(private val context: Context) {
             // Pre-spoof process-level signals: ApplicationInfo, snet_shared_uuid, pif.prop
             DgSpoofContext.prespoofProcessInfo(context)
 
-            // Spoof Build fields so DG VM sees real Samsung device identity.
-            // PIF's spoofBuild crashes .unstable on Samsung Android 12 (JNI field ID bug).
-            // Java reflection avoids the JNI layer entirely.
-            spoofBuildFields(context)
-
-            // S220: Stock .unstable loads ZERO native .so from GmsCore/lib/ dir.
-            // Verified from /tmp/stock_maps_current_s220.txt: stock has 306 .so (all system/framework),
-            // microG had 338 = same 306 + 32 extra from loadStockNativeLibs(). Stock loads native
-            // code from WITHIN the APK (r-xp on base.apk at offset 0x8740000), not as separate files.
-            // The 32 extra .so were a massive detection signal in dl_iterate_phdr (7 calls/session).
-            // loadStockNativeLibs() REMOVED. libgcore_jni.so + link_map unlink REMOVED (not needed).
-
-            // NOTE: mmapStockApk removed. The hybrid APK at /system/priv-app/GmsCore/
-            // is already 379MB (includes stock DEX 6-17). Stock GMS on this Samsung does
-            // NOT show a separate APK file mmap in maps (only dalvik-cache OAT/VDEX).
-            // The gmscore_cached.apk was creating a non-stock artifact that SUSFS had to hide.
-
-            // S217: Maps snapshot REMOVED. Writing to constellation_logs/ creates a non-stock
-            // directory that DG can detect via faccessat. For debugging, manually capture maps:
-            // adb shell "su -c 'cat /proc/$(pidof com.google.android.gms.unstable)/maps'" > /tmp/maps.txt
-
-            // Use the app's natural PathClassLoader as DG VM parent.
-            // S217: StockFirstClassLoader REMOVED from chain. DG captures getClass().getName()
-            // for each classloader — our custom class "StockFirstClassLoader" was a detection
-            // signal. Stock GMS shows plain "dalvik.system.PathClassLoader". FindClass probes
-            // only target DG's own runtime classes (S216 proven), so stock-first ordering
-            // provides zero benefit while adding a non-stock class name to the chain.
-            // Chain now: DgVmClassLoader → PathClassLoader(APK) → BootClassLoader = stock.
             DgIntrospect.markPhase("LOAD")
             val parentLoader = context.classLoader
             // Named class: getClass().getName() = "com.google.android.gms.droidguard.DgVmClassLoader"
@@ -167,75 +139,5 @@ open class HandleProxyFactory(private val context: Context) {
         val PROD_CERT_HASH = byteArrayOf(61, 122, 18, 35, 1, -102, -93, -99, -98, -96, -29, 67, 106, -73, -64, -119, 107, -5, 79, -74, 121, -12, -34, 95, -25, -62, 63, 50, 108, -113, -103, 74)
 
 
-        @Volatile
-        private var buildSpoofed = false
-
-        /**
-         * Spoof android.os.Build fields via Java reflection.
-         * PIF's JNI-based spoofBuild crashes on Samsung Android 12 (invalid field ID).
-         * This achieves the same result safely from Java.
-         * Values match PIF's pif.prop (Pixel 7 Beta).
-         */
-        fun spoofBuildFields(context: Context) {
-            if (buildSpoofed) return
-            synchronized(CLASS_LOCK) {
-                if (buildSpoofed) return
-                try {
-                    // Read Build identity from accessible locations.
-                    // /data/adb/ is not readable by GMS (non-root, SELinux gmscore_app).
-                    // Priority: 1) microG files dir pif.prop, 2) real device values (no spoof)
-                    val pifLocations = listOf(
-                        java.io.File(context.filesDir, "pif.prop"),
-                        java.io.File("/data/adb/modules/playintegrityfix/pif.prop")
-                    )
-                    val props = pifLocations.firstOrNull { it.canRead() }?.let { f ->
-                        val p = java.util.Properties()
-                        f.inputStream().use { p.load(it) }
-                        android.util.Log.i("HandleProxyFactory", "Loaded Build identity from ${f.absolutePath}")
-                        p
-                    }
-                    // Fall back to real device identity — no spoofing mismatch is better than
-                    // Pixel 7 Java + Samsung native (a clear spoofing signal DG can detect)
-                    val fingerprint = props?.getProperty("FINGERPRINT") ?: android.os.Build.FINGERPRINT
-                    val manufacturer = props?.getProperty("MANUFACTURER") ?: android.os.Build.MANUFACTURER
-                    val model = props?.getProperty("MODEL") ?: android.os.Build.MODEL
-                    val securityPatch = props?.getProperty("SECURITY_PATCH")
-
-                    val buildClass = android.os.Build::class.java
-                    val versionClass = android.os.Build.VERSION::class.java
-
-                    fun setField(clazz: Class<*>, name: String, value: String) {
-                        try {
-                            val field = clazz.getDeclaredField(name)
-                            field.isAccessible = true
-                            field.set(null, value)
-                        } catch (e: Exception) {
-                            android.util.Log.w("HandleProxyFactory", "Failed to spoof Build.$name: ${e.message}")
-                        }
-                    }
-
-                    setField(buildClass, "FINGERPRINT", fingerprint)
-                    setField(buildClass, "MANUFACTURER", manufacturer)
-                    setField(buildClass, "MODEL", model)
-                    setField(buildClass, "BRAND", manufacturer.lowercase())
-                    // Parse fingerprint for PRODUCT, DEVICE, ID
-                    // Format: brand/product/device:version/id/incremental:type/tags
-                    val parts = fingerprint.split("/", ":")
-                    if (parts.size >= 5) {
-                        setField(buildClass, "PRODUCT", parts[1])
-                        setField(buildClass, "DEVICE", parts[2].substringBefore(":"))
-                        setField(buildClass, "ID", parts[4])
-                    }
-                    if (securityPatch != null) {
-                        setField(versionClass, "SECURITY_PATCH", securityPatch)
-                    }
-
-                    android.util.Log.i("HandleProxyFactory", "Build fields spoofed: MODEL=$model MANUFACTURER=$manufacturer FINGERPRINT=${fingerprint.take(40)}...")
-                    buildSpoofed = true
-                } catch (e: Exception) {
-                    android.util.Log.e("HandleProxyFactory", "Build spoof failed: ${e.message}")
-                }
-            }
-        }
     }
 }
