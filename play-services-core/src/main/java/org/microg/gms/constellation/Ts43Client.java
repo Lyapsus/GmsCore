@@ -55,7 +55,7 @@ public class Ts43Client {
     private static final int AT_MAC = 11;
 
     private static final String EAP_RELAY_ACCEPT = "application/vnd.gsma.eap-relay.v1.0+json";
-    private static final String NAI_FORMAT = "0%s@nai.epc.mnc%s.mcc%s.3gppnetwork.org";
+    // NAI realm default: nai.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org (3GPP TS 23.003)
 
     private static final int NETWORK_BIND_NONE = 0;
     private static final int NETWORK_BIND_WIFI = 1;
@@ -353,35 +353,14 @@ public class Ts43Client {
         byte[] auts;
     }
 
-    private static final class LengthInfo {
-        final int length;
-        final int bytes;
-
-        private LengthInfo(int length, int bytes) {
-            this.length = length;
-            this.bytes = bytes;
-        }
-    }
-
-    private LengthInfo readLength(byte[] data, int offset) {
-        if (offset >= data.length) {
-            return null;
-        }
-        int first = data[offset] & 0xFF;
-        if ((first & 0x80) == 0) {
-            return new LengthInfo(first, 1);
-        }
-        int count = first & 0x7F;
-        if (count == 0 || count > 2 || offset + count >= data.length) {
-            return null;
-        }
-        int length = 0;
-        for (int i = 0; i < count; i++) {
-            length = (length << 8) | (data[offset + 1 + i] & 0xFF);
-        }
-        return new LengthInfo(length, 1 + count);
-    }
-
+    /**
+     * Parse SIM EAP-AKA authentication response (3GPP TS 31.102 Section 7.1.2).
+     *
+     * Success format: 0xDB [len_RES] [RES] [len_CK] [CK] [len_IK] [IK]
+     * Sync failure:   0xDC [len_AUTS] [AUTS]
+     *
+     * Note: No inner tags - just sequential length-value pairs after the status byte.
+     */
     private SimAuthResult parseSimResponse(String responseBase64) {
         if (responseBase64 == null) return null;
         byte[] data = base64Decoder.decode(responseBase64);
@@ -389,50 +368,55 @@ public class Ts43Client {
 
         SimAuthResult result = new SimAuthResult();
         int tag = data[0] & 0xFF;
-        LengthInfo outerLength = readLength(data, 1);
-        if (outerLength == null) {
-            logger.w(TAG, "Failed to parse SIM response length");
+        int offset = 1;
+
+        if (tag == 0xDB) {
+            // Success: sequential LV for RES, CK, IK
+            result.res = extractLv(data, offset);
+            if (result.res == null) {
+                logger.w(TAG, "Failed to extract RES from SIM response");
+                return null;
+            }
+            offset += 1 + result.res.length;
+
+            result.ck = extractLv(data, offset);
+            if (result.ck == null) {
+                logger.w(TAG, "Failed to extract CK from SIM response");
+                return null;
+            }
+            offset += 1 + result.ck.length;
+
+            result.ik = extractLv(data, offset);
+            if (result.ik == null) {
+                logger.w(TAG, "Failed to extract IK from SIM response");
+                return null;
+            }
+
+            logger.d(TAG, "SIM auth success: RES=" + result.res.length + "B, CK=" + result.ck.length + "B, IK=" + result.ik.length + "B");
+        } else if (tag == 0xDC) {
+            // Sync failure: LV for AUTS
+            result.auts = extractLv(data, offset);
+            if (result.auts == null) {
+                logger.w(TAG, "Failed to extract AUTS from SIM response");
+                return null;
+            }
+            logger.d(TAG, "SIM auth sync failure: AUTS=" + result.auts.length + "B");
+        } else {
+            logger.w(TAG, "Unknown SIM response tag: 0x" + Integer.toHexString(tag));
             return null;
         }
 
-        int offset = 1 + outerLength.bytes;
-        int end = offset + outerLength.length;
-        if (end > data.length) {
-            logger.w(TAG, "SIM response length exceeds buffer: length=" + outerLength.length + ", data=" + data.length);
-            end = data.length;
-        }
-
-        while (offset < end) {
-            if (offset + 1 >= end) {
-                break;
-            }
-            int t = data[offset] & 0xFF;
-            LengthInfo tlvLength = readLength(data, offset + 1);
-            if (tlvLength == null) {
-                logger.w(TAG, "Failed to parse SIM TLV length at offset=" + offset);
-                return null;
-            }
-            int valueOffset = offset + 1 + tlvLength.bytes;
-            int valueEnd = valueOffset + tlvLength.length;
-            if (valueEnd > end) {
-                logger.w(TAG, "SIM TLV length exceeds buffer (tag=" + t + ", len=" + tlvLength.length + ")");
-                break;
-            }
-
-            byte[] val = Arrays.copyOfRange(data, valueOffset, valueEnd);
-
-            if (tag == 0xDB) { // Success
-                if (t == 0xDC) result.res = val;
-                else if (t == 0xDD) result.ck = val;
-                else if (t == 0xDE) result.ik = val;
-            } else if (tag == 0xDC) { // Sync Failure
-                if (t == 0xDD) result.auts = val;
-            }
-
-            offset = valueEnd;
-        }
-
         return result;
+    }
+
+    /** Extract a length-value pair at the given offset. Returns the value bytes, or null on error. */
+    private byte[] extractLv(byte[] data, int offset) {
+        if (offset >= data.length) return null;
+        int len = data[offset] & 0xFF;
+        int valueStart = offset + 1;
+        int valueEnd = valueStart + len;
+        if (valueEnd > data.length) return null;
+        return Arrays.copyOfRange(data, valueStart, valueEnd);
     }
 
     private byte[] calculateMac(byte[] k_aut, byte[] packet) {
@@ -446,23 +430,91 @@ public class Ts43Client {
         }
     }
 
-    private byte[] deriveKey(byte[] mk, byte modifier) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA1");
-            mac.init(new SecretKeySpec(mk, "HmacSHA1"));
-            return mac.doFinal(new byte[]{modifier});
-        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
-            logger.e(TAG, "Failed to derive key", e);
-            return null;
+    /**
+     * FIPS 186-2 Change Notice 1 PRF (Appendix 3.1).
+     * Used by EAP-AKA (RFC 4187 Section 7) to derive key material from MK.
+     * Produces 160 bytes: K_encr(16) + K_aut(16) + MSK(64) + EMSK(64).
+     */
+    private byte[] fips186Prf(byte[] xKey) {
+        // SHA-1 initial hash values (H0-H4)
+        final int[] H = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+
+        byte[] result = new byte[160]; // 8 iterations * 20 bytes each
+        byte[] xKeyPadded = new byte[64];
+        System.arraycopy(xKey, 0, xKeyPadded, 0, Math.min(xKey.length, 64));
+
+        for (int iter = 0; iter < 8; iter++) {
+            // Message schedule W[0..79] from xKeyPadded
+            int[] w = new int[80];
+            for (int i = 0; i < 16; i++) {
+                w[i] = ((xKeyPadded[i * 4] & 0xFF) << 24)
+                      | ((xKeyPadded[i * 4 + 1] & 0xFF) << 16)
+                      | ((xKeyPadded[i * 4 + 2] & 0xFF) << 8)
+                      | (xKeyPadded[i * 4 + 3] & 0xFF);
+            }
+            for (int i = 16; i < 80; i++) {
+                w[i] = Integer.rotateLeft(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+            }
+
+            // SHA-1 compression with H[] as IV
+            int a = H[0], b = H[1], c = H[2], d = H[3], e = H[4];
+            for (int i = 0; i < 80; i++) {
+                int f, k;
+                if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999; }
+                else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; }
+                else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
+                else { f = b ^ c ^ d; k = 0xCA62C1D6; }
+                int temp = Integer.rotateLeft(a, 5) + f + e + k + w[i];
+                e = d; d = c; c = Integer.rotateLeft(b, 30); b = a; a = temp;
+            }
+
+            // Output = H[] + {a,b,c,d,e} (without adding back to H[])
+            int[] out = {H[0] + a, H[1] + b, H[2] + c, H[3] + d, H[4] + e};
+            for (int i = 0; i < 5; i++) {
+                int off = iter * 20 + i * 4;
+                result[off]     = (byte) (out[i] >> 24);
+                result[off + 1] = (byte) (out[i] >> 16);
+                result[off + 2] = (byte) (out[i] >> 8);
+                result[off + 3] = (byte) out[i];
+            }
+
+            // xKey += output (last 20 bytes) with carry, per FIPS 186-2
+            long carry = 0;
+            int outStart = iter * 20;
+            for (int i = 19; i >= 0; i--) {
+                carry += (xKeyPadded[i] & 0xFFL) + (result[outStart + i] & 0xFFL);
+                xKeyPadded[i] = (byte) carry;
+                carry >>= 8;
+            }
         }
+
+        return result;
     }
 
-    private String getNai(String imsi, String mcc, String mnc) {
-        // 0<IMSI>@nai.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org
+    /**
+     * Derive EAP-AKA keys from MK using FIPS 186-2 PRF (RFC 4187 Section 7).
+     * Returns: K_encr(16) + K_aut(16) + MSK(64) + EMSK(64) = 160 bytes.
+     */
+    private byte[] deriveKeys(byte[] mk) {
+        return fips186Prf(mk);
+    }
+
+    private String getNai(String imsi, String mcc, String mnc, String realm) {
+        // 0<IMSI>@<realm>
+        // Default realm: nai.epc.mnc<MNC>.mcc<MCC>.3gppnetwork.org (3GPP TS 23.003)
         // MNC must be 3 digits in the domain
         String mnc3 = mnc.length() == 2 ? "0" + mnc : mnc;
-        String nai = String.format(NAI_FORMAT, imsi, mnc3, mcc);
-        logger.d(TAG, "Derived NAI: " + nai + " (format=" + NAI_FORMAT + ")");
+        String effectiveRealm;
+        if (realm != null && !realm.isEmpty() && !realm.equals("nai.epc")
+                && realm.contains(".mnc") && realm.contains(".mcc") && realm.contains("3gppnetwork.org")) {
+            effectiveRealm = realm;
+        } else if (realm != null && !realm.isEmpty() && !realm.equals("nai.epc")) {
+            effectiveRealm = realm;
+        } else {
+            effectiveRealm = String.format("nai.epc.mnc%s.mcc%s.3gppnetwork.org", mnc3, mcc);
+        }
+        String nai = "0" + imsi + "@" + effectiveRealm;
+        logger.d(TAG, "Derived NAI: " + nai + (realm != null ? " (server realm=" + realm + ")" : " (default realm)"));
         return nai;
     }
 
@@ -781,7 +833,7 @@ public class Ts43Client {
         }
         String mcc = simOperator.substring(0, 3);
         String mnc = simOperator.substring(3);
-        String identity = getNai(imsi, mcc, mnc);
+        String identity = getNai(imsi, mcc, mnc, null);
 
         byte[] mkInput = new byte[identity.length() + authResult.ik.length + authResult.ck.length];
         int pos = 0;
@@ -798,9 +850,11 @@ public class Ts43Client {
             return null;
         }
 
-        byte[] k_aut = deriveKey(mk, (byte) 2); // K_aut = PRF(MK, 2)
-        if (k_aut == null) return null;
-        // K_aut is first 160 bits (20 bytes) of PRF output. HMAC-SHA1 output is 20 bytes, so we use it all.
+        // Derive keys using FIPS 186-2 PRF (RFC 4187 Section 7)
+        // Output: K_encr(16) + K_aut(16) + MSK(64) + EMSK(64) = 160 bytes
+        byte[] keyMaterial = deriveKeys(mk);
+        if (keyMaterial == null) return null;
+        byte[] k_aut = Arrays.copyOfRange(keyMaterial, 16, 32); // K_aut = bytes 16-31 (128 bits)
 
         // 4. Construct EAP Response Packet
         // Code=2 (Response), ID=id, Type=23, Subtype=1 (Challenge)
@@ -834,8 +888,10 @@ public class Ts43Client {
         // AT_RES
         packet[pos++] = (byte) AT_RES;
         packet[pos++] = (byte) (atResLen / 4);
-        packet[pos++] = (byte) (resLen * 8); // RES Length in bits
-        packet[pos++] = 0x00; // Reserved
+        // RES Length in bits, 2-byte big-endian (RFC 4187 Section 10.3)
+        int resBits = resLen * 8;
+        packet[pos++] = (byte) (resBits >> 8);
+        packet[pos++] = (byte) resBits;
         System.arraycopy(authResult.res, 0, packet, pos, resLen);
         pos += resLen;
         pos += resPad; // Skip padding (already 0)
