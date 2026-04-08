@@ -106,6 +106,9 @@ private val CONFIGURATION_OPTIONS = mapOf(
         Flag("45668769", true, 0),
         Flag("45633067", true, 0),
     ),
+    "com.google.android.apps.photos" to arrayOf(
+        Flag("45617431", true, 0),
+    ),
     "com.google.android.apps.messaging" to RCS_PROVISIONING_FLAGS,
     "com.google.android.apps.messaging#com.google.android.apps.messaging" to RCS_PROVISIONING_FLAGS,
     "com.google.android.ims.library" to RCS_PROVISIONING_FLAGS,
