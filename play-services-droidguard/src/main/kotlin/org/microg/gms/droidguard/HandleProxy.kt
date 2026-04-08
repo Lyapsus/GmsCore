@@ -18,9 +18,7 @@ class HandleProxy(val handle: Any, val vmKey: String, val extra: ByteArray = Byt
             // in the class name, instantly identifying microG. Pass the raw service context so DG
             // sees: DroidGuardChimeraService → TracingIntentService → chimera.Service → ContextWrapper.
             // PM spoofing is process-level (prespoofProcessInfo + patchPmDirect in HandleProxyFactory).
-            var ctx: Context = context
-            if (DgIntrospect.isEnabled(context)) ctx = DgIntrospect.InstrumentedContext(ctx)
-            clazz.getDeclaredConstructor(Context::class.java, Parcelable::class.java).newInstance(ctx, data)
+            clazz.getDeclaredConstructor(Context::class.java, Parcelable::class.java).newInstance(context, data)
         }.getOrElse {
             throw BytesException(ByteArray(0), it)
         },
@@ -30,10 +28,7 @@ class HandleProxy(val handle: Any, val vmKey: String, val extra: ByteArray = Byt
     constructor(clazz: Class<*>, context: Context, flow: String?, byteCode: ByteArray, callback: Any, vmKey: String, extra: ByteArray, bundle: Bundle?) : this(
         kotlin.runCatching {
             DgIntrospect.markPhase("CONSTRUCT")
-            // Same as above: pass raw context, not DgSpoofContext wrapper.
-            var ctx: Context = context
-            if (DgIntrospect.isEnabled(context)) ctx = DgIntrospect.InstrumentedContext(ctx)
-            clazz.getDeclaredConstructor(Context::class.java, String::class.java, ByteArray::class.java, Object::class.java, Bundle::class.java).newInstance(ctx, flow, byteCode, callback, bundle)
+            clazz.getDeclaredConstructor(Context::class.java, String::class.java, ByteArray::class.java, Object::class.java, Bundle::class.java).newInstance(context, flow, byteCode, callback, bundle)
         }.getOrElse {
             throw BytesException(extra, it)
         }, vmKey, extra)
@@ -67,11 +62,8 @@ class HandleProxy(val handle: Any, val vmKey: String, val extra: ByteArray = Byt
         try {
             DgIntrospect.markPhase("CLOSE")
             handle.javaClass.getDeclaredMethod("close").invoke(handle)
-            // Stop introspection and flush all captured data
-            DgIntrospect.unhookNative()
             DgIntrospect.stopCapture()
         } catch (e: Exception) {
-            DgIntrospect.unhookNative()
             DgIntrospect.stopCapture()
             throw BytesException(extra, e)
         }

@@ -283,9 +283,6 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
         request: DroidGuardResultsRequest?
     ): HandleProxy {
         ProfileManager.ensureInitialized(context)
-        // Load native lib for dlopen helper only (NO JNI hooks — hooks point outside
-        // libart.so address range, making them detectable). S218: hooks eliminated.
-        DgIntrospect.loadNativeLibOnly(context)
         val clazz = loadClass(vmKey, extra)
         return HandleProxy(clazz, context, flow, byteCode, callback, vmKey, extra, request?.bundle)
     }
