@@ -30,19 +30,29 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
     private val queue = singleInstanceOf { Volley.newRequestQueue(context.applicationContext) }
 
     fun createHandle(packageName: String, flow: String?, callback: GuardCallback, request: DroidGuardResultsRequest?): HandleProxy {
-        if (!DroidGuardPreferences.isLocalAvailable(context)) throw IllegalAccessException("DroidGuard should not be available locally")
+        if (!DroidGuardPreferences.isLocalAvailable(context)) {
+            android.util.Log.e("DroidGuard", "createHandle(flow=$flow, pkg=$packageName): DroidGuard not available locally - check microG Settings > SafetyNet > DroidGuard enabled")
+            throw IllegalAccessException("DroidGuard should not be available locally")
+        }
+        android.util.Log.d("DroidGuard", "createHandle(flow=$flow, pkg=$packageName): starting")
         val (vmKey, byteCode, bytes) = readFromDatabase(flow) ?: fetchFromServer(flow, packageName)
         return createHandleProxy(flow, vmKey, byteCode, bytes, callback, request)
     }
 
     fun createPingHandle(packageName: String, flow: String, callback: GuardCallback, pingData: PingData?): HandleProxy {
-        if (!DroidGuardPreferences.isLocalAvailable(context)) throw IllegalAccessException("DroidGuard should not be available locally")
+        if (!DroidGuardPreferences.isLocalAvailable(context)) {
+            android.util.Log.e("DroidGuard", "createPingHandle(flow=$flow): DroidGuard not available locally")
+            throw IllegalAccessException("DroidGuard should not be available locally")
+        }
         val (vmKey, byteCode, bytes) = fetchFromServer(flow, createRequest(flow, packageName, pingData))
         return createHandleProxy(flow, vmKey, byteCode, bytes, callback, DroidGuardResultsRequest().also { it.clientVersion = 0 })
     }
 
     fun createLowLatencyHandle(flow: String?, callback: GuardCallback, request: DroidGuardResultsRequest?): HandleProxy {
-        if (!DroidGuardPreferences.isLocalAvailable(context)) throw IllegalAccessException("DroidGuard should not be available locally")
+        if (!DroidGuardPreferences.isLocalAvailable(context)) {
+            android.util.Log.e("DroidGuard", "createLowLatencyHandle(flow=$flow): DroidGuard not available locally")
+            throw IllegalAccessException("DroidGuard should not be available locally")
+        }
         val (vmKey, byteCode, bytes) = readFromDatabase("fast") ?: throw Exception("low latency (fast) flow not available")
         return createHandleProxy(flow, vmKey, byteCode, bytes, callback, request)
     }
@@ -59,17 +69,13 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
         ProfileManager.ensureInitialized(context)
         val id = "$flow/${version.versionString}/${Build.FINGERPRINT}"
         val hit = dgDb.get(id)
-        // For constellation_verify debugging, we need to know whether we're actually exercising
-        // a new server VM/bytecode or reusing a cached one.
-        if (flow == "constellation_verify") {
-            if (hit == null) {
-                android.util.Log.i("DroidGuard", "DB cache MISS for flow='$flow' id='$id'")
-            } else {
-                android.util.Log.i(
-                    "DroidGuard",
-                    "DB cache HIT for flow='$flow' id='$id': vmKey=${hit.first.take(12)}... byteCode=${hit.second.size}B extra=${hit.third.size}B"
-                )
-            }
+        if (hit == null) {
+            android.util.Log.i("DroidGuard", "DB cache MISS for flow='$flow' id='$id'")
+        } else {
+            android.util.Log.i(
+                "DroidGuard",
+                "DB cache HIT for flow='$flow' id='$id': vmKey=${hit.first.take(12)}... byteCode=${hit.second.size}B extra=${hit.third.size}B"
+            )
         }
         return hit
     }
@@ -247,8 +253,9 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
             temp.renameTo(getTheApkFile(vmKey))
             updateCacheTimestamp(vmKey)
             if (!isValidCache(vmKey)) {
+                android.util.Log.e("DroidGuard", "VM cache write failed for vmKey=$vmKey: apk=${getTheApkFile(vmKey).exists()} opt=${getOptDir(vmKey).isDirectory} cacheDir=${getCacheDir(vmKey).absolutePath}")
                 getCacheDir(vmKey).deleteRecursively()
-                throw IllegalStateException()
+                throw IllegalStateException("VM cache validation failed after write for vmKey=$vmKey")
             }
             if (flow == "constellation_verify") {
                 try {

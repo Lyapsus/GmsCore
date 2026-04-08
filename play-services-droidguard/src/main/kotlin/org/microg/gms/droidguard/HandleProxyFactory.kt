@@ -79,21 +79,26 @@ open class HandleProxyFactory(private val context: Context) {
         synchronized(CLASS_LOCK) {
             val cachedClass = classMap[vmKey]
             if (cachedClass != null) {
+                android.util.Log.d("DroidGuard", "loadClass(vmKey=${vmKey.take(12)}...): classMap HIT")
                 updateCacheTimestamp(vmKey)
                 return cachedClass
             }
             val weakClass = weakClassMap[vmKey]
             if (weakClass != null) {
+                android.util.Log.d("DroidGuard", "loadClass(vmKey=${vmKey.take(12)}...): weakMap HIT")
                 classMap[vmKey] = weakClass
                 updateCacheTimestamp(vmKey)
                 return weakClass
             }
+            android.util.Log.i("DroidGuard", "loadClass(vmKey=${vmKey.take(12)}...): LOADING FRESH from ${getCacheDir(vmKey).absolutePath}")
             if (!isValidCache(vmKey)) {
+                android.util.Log.e("DroidGuard", "loadClass: cache invalid for vmKey=$vmKey, cacheDir=${getCacheDir(vmKey).absolutePath}, apk=${getTheApkFile(vmKey).exists()}, opt=${getOptDir(vmKey).isDirectory}")
                 throw BytesException(bytes, "VM key $vmKey not found in cache")
             }
             if (!verifyApkSignature(getTheApkFile(vmKey))) {
+                android.util.Log.e("DroidGuard", "loadClass: APK signature verification failed for vmKey=$vmKey")
                 getCacheDir(vmKey).deleteRecursively()
-                throw ClassNotFoundException("APK signature verification failed")
+                throw ClassNotFoundException("APK signature verification failed for vmKey=$vmKey")
             }
             // Debug wait: pause before DG init so Frida can attach to .unstable.
             // Opt-in via file (no Settings query = no timing anomaly in normal operation).
