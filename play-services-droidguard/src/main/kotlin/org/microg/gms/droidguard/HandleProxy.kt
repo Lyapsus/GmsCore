@@ -14,7 +14,9 @@ class HandleProxy(val handle: Any, val vmKey: String, val extra: ByteArray = Byt
         kotlin.runCatching {
             DgIntrospect.markPhase("CONSTRUCT")
             android.util.Log.d("DroidGuard", "HandleProxy(vmKey=$vmKey): constructing via (Context, Parcelable)")
-            clazz.getDeclaredConstructor(Context::class.java, Parcelable::class.java).newInstance(context, data)
+            var ctx: Context = context
+            if (DgIntrospect.isEnabled(context)) ctx = DgIntrospect.InstrumentedContext(ctx)
+            clazz.getDeclaredConstructor(Context::class.java, Parcelable::class.java).newInstance(ctx, data)
         }.getOrElse {
             android.util.Log.e("DroidGuard", "HandleProxy(vmKey=$vmKey): DG VM init FAILED: ${it.javaClass.simpleName}: ${it.message}")
             throw BytesException(ByteArray(0), it)
@@ -26,7 +28,9 @@ class HandleProxy(val handle: Any, val vmKey: String, val extra: ByteArray = Byt
         kotlin.runCatching {
             DgIntrospect.markPhase("CONSTRUCT")
             android.util.Log.d("DroidGuard", "HandleProxy(flow=$flow, vmKey=${vmKey.take(12)}...): constructing via (Context, String, ByteArray, Object, Bundle)")
-            clazz.getDeclaredConstructor(Context::class.java, String::class.java, ByteArray::class.java, Object::class.java, Bundle::class.java).newInstance(context, flow, byteCode, callback, bundle)
+            var ctx: Context = context
+            if (DgIntrospect.isEnabled(context)) ctx = DgIntrospect.InstrumentedContext(ctx)
+            clazz.getDeclaredConstructor(Context::class.java, String::class.java, ByteArray::class.java, Object::class.java, Bundle::class.java).newInstance(ctx, flow, byteCode, callback, bundle)
         }.getOrElse {
             android.util.Log.e("DroidGuard", "HandleProxy(flow=$flow, vmKey=${vmKey.take(12)}...): DG VM init FAILED: ${it.javaClass.simpleName}: ${it.message}")
             throw BytesException(extra, it)
@@ -65,9 +69,12 @@ class HandleProxy(val handle: Any, val vmKey: String, val extra: ByteArray = Byt
         try {
             DgIntrospect.markPhase("CLOSE")
             handle.javaClass.getDeclaredMethod("close").invoke(handle)
+            // Stop introspection and flush all captured data
+            DgIntrospect.unhookNative()
             DgIntrospect.stopCapture()
         } catch (e: Exception) {
             android.util.Log.w("DroidGuard", "DG VM close(vmKey=${vmKey.take(12)}...): error: ${e.message}")
+            DgIntrospect.unhookNative()
             DgIntrospect.stopCapture()
             throw BytesException(extra, e)
         }
