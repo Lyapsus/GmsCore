@@ -272,7 +272,17 @@ public class Ts43Client {
                 logger.w(TAG, "EAP-AKA auth failed - no token obtained");
                 return EntitlementResult.error("eap-aka-auth-failed");
             }
-            logger.i(TAG, "EAP-AKA auth succeeded, token length=" + authToken.length());
+            logger.i(TAG, "EAP-AKA auth succeeded, auth_token length=" + authToken.length());
+
+            // Phase 2: ODSA request with auth token to get phone number / temp token
+            // The auth token is intermediate; the server expects the ODSA response body
+            String odsaResponse = performOdsaRequest(subId, entitlementUrl, authToken);
+            if (odsaResponse != null) {
+                logger.i(TAG, "ODSA response received, length=" + odsaResponse.length());
+                return EntitlementResult.success(odsaResponse);
+            }
+            // If ODSA fails, fall back to returning the auth token itself
+            logger.w(TAG, "ODSA request failed, returning auth token as fallback");
             return EntitlementResult.success(authToken);
 
         } catch (java.net.UnknownHostException e) {
@@ -384,6 +394,15 @@ public class Ts43Client {
             conn.setRequestProperty("Accept", EAP_RELAY_ACCEPT + ", text/vnd.wap.connectivity-xml");
             conn.setRequestProperty("Content-Type", EAP_RELAY_ACCEPT);
             conn.setDoOutput(true);
+            // Apply cookies to POST connection
+            if (!cookies.isEmpty()) {
+                StringBuilder cookieHeader = new StringBuilder();
+                for (java.util.Map.Entry<String, String> entry : cookies.entrySet()) {
+                    if (cookieHeader.length() > 0) cookieHeader.append("; ");
+                    cookieHeader.append(entry.getKey()).append("=").append(entry.getValue());
+                }
+                conn.setRequestProperty("Cookie", cookieHeader.toString());
+            }
 
             String postBody = "{\"eap-relay-packet\":\"" + eapResponse + "\"}";
             logger.d(TAG, "EAP round " + round + ": POST eap-relay-packet (" + eapResponse.length() + " chars)");
@@ -392,6 +411,43 @@ public class Ts43Client {
 
         logger.w(TAG, "EAP-AKA auth: exceeded 3 rounds without completing");
         return null;
+    }
+
+    /**
+     * Phase 2: ODSA request with auth token.
+     * GET entitlementUrl?token=<auth_token> → server returns phone number or temp token.
+     * Returns the raw response body for inclusion in ChallengeResponse proto.
+     */
+    private String performOdsaRequest(int subId, String entitlementUrl, String authToken) {
+        try {
+            String separator = entitlementUrl.contains("?") ? "&" : "?";
+            String odsaUrl = entitlementUrl + separator + "token=" + java.net.URLEncoder.encode(authToken, "UTF-8");
+            logger.d(TAG, "ODSA request: GET " + entitlementUrl + "?token=<" + authToken.length() + " chars>");
+
+            HttpURLConnection conn = openNetworkConnection(odsaUrl, subId);
+            conn.setConnectTimeout(TS43_TIMEOUT_MS);
+            conn.setReadTimeout(TS43_TIMEOUT_MS);
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setInstanceFollowRedirects(false);
+
+            int responseCode = conn.getResponseCode();
+            logger.d(TAG, "ODSA response: HTTP " + responseCode);
+
+            if (responseCode == 200) {
+                String body = readStream(conn.getInputStream());
+                conn.disconnect();
+                logger.d(TAG, "ODSA body length=" + body.length());
+                return body;
+            }
+
+            logger.w(TAG, "ODSA request failed: HTTP " + responseCode);
+            conn.disconnect();
+            return null;
+        } catch (Exception e) {
+            logger.e(TAG, "ODSA request exception: " + e.getMessage(), e);
+            return null;
+        }
     }
 
     /** Extract eap-relay-packet from JSON body. */
@@ -591,8 +647,8 @@ public class Ts43Client {
                 result[off + 3] = (byte) out[i];
             }
 
-            // xKey += output (last 20 bytes) with carry, per FIPS 186-2
-            long carry = 0;
+            // xKey = (1 + xKey + output) mod 2^b, per FIPS 186-2 Appendix 3.1
+            long carry = 1;
             int outStart = iter * 20;
             for (int i = 19; i >= 0; i--) {
                 carry += (xKeyPadded[i] & 0xFFL) + (result[outStart + i] & 0xFFL);

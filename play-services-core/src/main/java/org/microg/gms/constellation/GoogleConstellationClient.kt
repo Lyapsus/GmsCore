@@ -656,14 +656,27 @@ class GoogleConstellationClient(private val context: Context) {
                 )
             }
 
-            // Success: return auth token in client_challenge_response
-            return google.internal.communications.phonedeviceverification.v1.ChallengeResponse(
-                ts43_challenge_response = google.internal.communications.phonedeviceverification.v1.Ts43ChallengeResponse(
+            // Route result to correct proto field based on challenge type
+            val responseToken = result.token ?: ""
+            val ts43Response = if (ts43Challenge.server_challenge != null) {
+                // Server challenge: return in server_challenge_response
+                google.internal.communications.phonedeviceverification.v1.Ts43ChallengeResponse(
                     ts43_type = ts43Challenge.ts43_type,
-                    client_challenge_response = google.internal.communications.phonedeviceverification.v1.ClientChallengeResponse(
-                        payload = result.token ?: ""
+                    server_challenge_response = google.internal.communications.phonedeviceverification.v1.ServerChallengeResponse(
+                        acquire_temporary_token_response = responseToken
                     )
                 )
+            } else {
+                // Client challenge (default): return in client_challenge_response
+                google.internal.communications.phonedeviceverification.v1.Ts43ChallengeResponse(
+                    ts43_type = ts43Challenge.ts43_type,
+                    client_challenge_response = google.internal.communications.phonedeviceverification.v1.ClientChallengeResponse(
+                        get_phone_number_response = responseToken
+                    )
+                )
+            }
+            return google.internal.communications.phonedeviceverification.v1.ChallengeResponse(
+                ts43_challenge_response = ts43Response
             )
         } catch (e: Exception) {
             Log.e(TAG, "  TS43: exception: ${e.javaClass.simpleName}: ${e.message}")
