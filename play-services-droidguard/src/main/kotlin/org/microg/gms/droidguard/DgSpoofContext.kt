@@ -73,7 +73,7 @@ class DgSpoofContext(base: Context) : ContextWrapper(base) {
 
         /**
          * Patch a specific PackageManager instance's mPM binder with our intercepting proxy.
-         * No static guard — patches exactly the instance given.
+         * No static guard - patches exactly the instance given.
          */
         fun patchPmInstanceDirect(pm: PackageManager, gmsPackage: String) {
             try {
@@ -302,7 +302,7 @@ class DgSpoofContext(base: Context) : ContextWrapper(base) {
             // Patch PackageManager to intercept getPackageInfo results
             patchPackageManager(context)
 
-            // Patch process-global ActivityThread.sPackageManager — catches ALL PM calls
+            // Patch process-global ActivityThread.sPackageManager - catches ALL PM calls
             // regardless of which Context or PackageManager instance is used
             patchActivityThreadPm(context.packageName)
 

@@ -63,7 +63,7 @@ public class ConfigurationProvider extends ContentProvider {
             // and get a properly signed JWT token
             cursor.addRow(new Object[]{FLAG_ENABLE_UPI, FLAG_TRUE});
             cursor.addRow(new Object[]{FLAG_ENABLE_UPI_MVP, FLAG_TRUE});
-            cursor.addRow(new Object[]{FLAG_ACS_URL, ""});  // empty per stock GMS — URL from mcc_url_format
+            cursor.addRow(new Object[]{FLAG_ACS_URL, ""});  // empty per stock GMS - URL from mcc_url_format
             cursor.addRow(new Object[]{FLAG_MCC_URL_FORMAT, JIBE_MCC_URL_FORMAT});
             cursor.addRow(new Object[]{"RcsProvisioning__enable_client_attestation_check", FLAG_FALSE});
             cursor.addRow(new Object[]{"RcsProvisioning__enable_client_attestation_check_v2", FLAG_FALSE});

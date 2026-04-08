@@ -90,7 +90,7 @@ class AppCertManager(private val context: Context) {
                 }
                 val androidIdHex = java.lang.Long.toHexString(checkinAndroidId)
                 val sessionId = Random.nextLong()
-                // Stock GMS v26.02.33 version code — devicekey server validates this
+                // Stock GMS v26.02.33 version code - devicekey server validates this
                 val stockGmsVersionCode = 260233029
                 val data = hashMapOf(
                         "dg_androidId" to androidIdHex,
@@ -103,7 +103,7 @@ class AppCertManager(private val context: Context) {
                 } catch (e: Exception) {
                     null
                 }
-                // Stock GMS (ajoq.b bytecode) sends literal "missing_token" — no FCM registration
+                // Stock GMS (ajoq.b bytecode) sends literal "missing_token" - no FCM registration
                 val request = DeviceKeyRequest(
                         droidGuardResult = droidGuardResult,
                         androidId = checkinAndroidId,

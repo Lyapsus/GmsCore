@@ -197,8 +197,8 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
         })
         val signed: SignedResponse = future.get()
         val response = signed.unpack()
-        // S220: Stock GMS uses uppercase hex for vmKey (visible in maps as DG cache path).
-        // okio ByteString.hex() returns lowercase → maps showed app_dg_cache/c979... vs stock C979...
+        // Stock GMS uses uppercase hex for vmKey (cache subdirectory name visible in /proc/self/maps).
+        // okio ByteString.hex() returns lowercase — must uppercase to match stock.
         val vmKey = response.vmChecksum!!.hex().uppercase()
 
         if (flow == "constellation_verify") {

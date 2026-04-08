@@ -13,7 +13,7 @@ class HandleProxy(val handle: Any, val vmKey: String, val extra: ByteArray = Byt
     constructor(clazz: Class<*>, context: Context, vmKey: String, data: Parcelable) : this(
         kotlin.runCatching {
             DgIntrospect.markPhase("CONSTRUCT")
-            // DO NOT wrap in DgSpoofContext — DG calls getClass() on the context and walks
+            // DO NOT wrap in DgSpoofContext - DG calls getClass() on the context and walks
             // the superclass chain. DgSpoofContext(ContextWrapper) exposes "org.microg.gms.droidguard"
             // in the class name, instantly identifying microG. Pass the raw service context so DG
             // sees: DroidGuardChimeraService → TracingIntentService → chimera.Service → ContextWrapper.

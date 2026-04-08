@@ -48,7 +48,7 @@ class PhenotypeService : BaseService(TAG, GmsService.PHENOTYPE) {
 private val RCS_PROVISIONING_FLAGS = arrayOf(
     Flag("RcsProvisioning__min_gmscore_version_for_upi_without_acs_fallback_met", true, 0),
     Flag("RcsProvisioning__allow_manual_phone_number_input", true, 0),
-    // acs_url empty per stock GMS — URL comes from mcc_url_format template
+    // acs_url empty per stock GMS - URL comes from mcc_url_format template
     Flag("RcsFlags__acs_url", "", 0),
     // mcc_url_format: carrier-generic Jibe URL template (%s = MCC). Verified from stock GMS PhenotypePrefs.xml.
     Flag("RcsFlags__mcc_url_format", "rcs-acs-mcc%s.jibe.google.com", 0),
@@ -259,7 +259,7 @@ class PhenotypeServiceImpl(val packageName: String?) : IPhenotypeService.Stub() 
 
     override fun commitToConfigurationV2(callbacks: IPhenotypeCallbacks, data: ByteArray?) {
         Log.d(TAG, "commitToConfigurationV2(${data?.size ?: 0} bytes)")
-        // Return error 29501 — triggers SDK fallback to getConfigurationSnapshotWithToken(),
+        // Return error 29501 - triggers SDK fallback to getConfigurationSnapshotWithToken(),
         // which returns our flags with a non-empty snapshotToken. The SDK then writes the
         // .pb marker file to the calling app's phenotype/shared/ dir, making flags visible.
         callbacks.onCommitedToConfiguration(Status(29501))
@@ -267,7 +267,7 @@ class PhenotypeServiceImpl(val packageName: String?) : IPhenotypeService.Stub() 
 
     override fun getStorageInfo(callbacks: IGetStorageInfoCallbacks?) {
         Log.d(TAG, "getStorageInfo(callingPackage=$packageName)")
-        // Return error 29514 — same as stock GMS returns for unsupported callers (Play Store).
+        // Return error 29514 - same as stock GMS returns for unsupported callers (Play Store).
         // All clients (Messages ConfigurationUpdater, RegisterInternal) handle 29514 gracefully
         // by creating a timestamp-only fallback StorageInfo.
         callbacks?.onStorageInfo(Status(29514), null)

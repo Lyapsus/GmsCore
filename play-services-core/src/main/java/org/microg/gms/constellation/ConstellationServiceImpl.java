@@ -221,7 +221,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
      */
     private String getPhoneNumberFromSim(int subId) {
         try {
-            // Only return number for the SPECIFIC subId — never fall back to other SIMs.
+            // Only return number for the SPECIFIC subId - never fall back to other SIMs.
             // For per-SIM verification, returning another SIM's number causes wrong-number errors.
             SubscriptionManager sm = (SubscriptionManager) context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
 
@@ -292,10 +292,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
     @Override
     public void verifyPhoneNumber(IConstellationCallbacks callbacks, VerifyPhoneNumberRequest request, ApiMetadata metadata) throws RemoteException {
         Log.i(TAG, "verifyPhoneNumber() called - THIS IS THE KEY RCS METHOD");
-        // S220: Force manual MSISDN entry for testing. Set via:
-        //   adb shell settings put global microg_constellation_force_manual_msisdn 1
-        // Clear: adb shell settings delete global microg_constellation_force_manual_msisdn
-        // S220: Force manual MSISDN entry test. Returns status 7 on EVERY call until cleared.
+        // Force manual MSISDN entry for testing. Returns status 7 on EVERY call until cleared.
         //   adb shell settings put global microg_constellation_force_manual_msisdn 1
         //   adb shell settings delete global microg_constellation_force_manual_msisdn
         String forceManual = android.provider.Settings.Global.getString(context.getContentResolver(), "microg_constellation_force_manual_msisdn");
@@ -385,11 +382,11 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             // MANUAL MSISDN PATH: Server returned PHONE_NUMBER_ENTRY_REQUIRED (reason=5).
             // Return Status.SUCCESS + verificationStatus=7 so Messages shows phone input UI.
             // Messages then re-calls verifyPhoneNumber() with user-entered number.
-            // This is NOT the old bug (S143) — that was status=7 on ALL errors causing tight loops.
+            // This is NOT the old bug (S143) - that was status=7 on ALL errors causing tight loops.
             // Here we return status=7 ONLY when the server explicitly requests manual MSISDN.
             // ============================================================
             if (entitlement.needsManualMsisdn) {
-                Log.i(TAG, "Server requests manual phone number entry — returning verificationStatus=7");
+                Log.i(TAG, "Server requests manual phone number entry - returning verificationStatus=7");
                 PhoneNumberVerification verification = new PhoneNumberVerification(
                     phoneNumber,
                     System.currentTimeMillis(),
@@ -414,7 +411,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             // ============================================================
             // ERROR PATH: Stock GMS (bevw.java:26-83) sends Status(500x) with null response
             // on ANY Constellation error. Messages (dony.java:261-308) handles Status errors
-            // by going to RetryState with exponential backoff — NOT the tight loop caused
+            // by going to RetryState with exponential backoff - NOT the tight loop caused
             // by Status.SUCCESS + verificationStatus=7.
             //
             // Previously we returned Status.SUCCESS + verificationStatus=7 on errors, which

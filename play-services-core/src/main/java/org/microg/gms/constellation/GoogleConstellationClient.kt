@@ -111,7 +111,7 @@ import android.content.Intent
 class GoogleConstellationClient(private val context: Context) {
     companion object {
         private const val TAG = "GmsConstellationClient"
-        // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport — bewt.c bdpb has no account/scopes)
+        // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
         private const val API_KEY = "AIzaSyAP-gfH3qvi6vgHZbSYwQ_XHqV_mXHhzIk"
         private const val GMSCORE_VERSION_NUMBER = 260233
         private const val GMSCORE_VERSION = "26.02.33 (190400-{{cl}})"
@@ -186,7 +186,7 @@ class GoogleConstellationClient(private val context: Context) {
                 }
             }
 
-            // No preserved token found — register fresh
+            // No preserved token found - register fresh
             Log.i(TAG, "No preserved IID token found for sender $senderId, registering new")
 
             try {
@@ -222,7 +222,7 @@ class GoogleConstellationClient(private val context: Context) {
                             kf.generatePrivate(java.security.spec.PKCS8EncodedKeySpec(privBytes))
                         )
                     } else {
-                        // Key pair missing — regenerate
+                        // Key pair missing - regenerate
                         Log.w(TAG, "Key pair missing for existing instance ID, regenerating")
                         prefs.edit().remove("instance_id").apply()
                         return getOrRegisterIidToken(context, packageName, senderId)
@@ -302,8 +302,8 @@ class GoogleConstellationClient(private val context: Context) {
 
         /**
          * SMS inbox that buffers messages arriving before PENDING is detected.
-         * Inspired by opstic's MtSmsInboxRegistry — pre-register receivers BEFORE Sync
-         * so SMS arriving during the Sync RPC isn't missed (S210 race fix).
+         * Pre-register receivers BEFORE Sync so SMS arriving during the
+         * Sync RPC isn't missed.
          *
          * Lifecycle: prepare() before Sync → awaitMatch() after PENDING → dispose() in finally.
          * Uses both silent (createAppSpecificSmsToken PendingIntent) and noisy (SMS_RECEIVED) paths.
@@ -402,7 +402,7 @@ class GoogleConstellationClient(private val context: Context) {
              * Wait for OTP SMS. Checks buffer first (SMS may have arrived during Sync),
              * then blocks until new SMS arrives or timeout.
              * Silent path accepts unconditionally (Android pre-verified via token).
-             * Noisy path: all SMS are buffered — caller can filter if needed.
+             * Noisy path: all SMS are buffered - caller can filter if needed.
              */
             fun awaitMatch(timeoutSeconds: Long = 120): OtpSmsResult? {
                 synchronized(lock) {
@@ -440,11 +440,11 @@ class GoogleConstellationClient(private val context: Context) {
         }
     }
 
-    // ======== CHALLENGE VERIFIERS (S211) ========
+    // ======== CHALLENGE VERIFIERS ========
 
     /**
      * Send MO SMS to proxy_number from server challenge. Returns ChallengeResponse.
-     * Adapted from opstic's MoSmsVerifier — sends SMS and waits for delivery confirmation.
+     * Sends SMS and waits for delivery confirmation.
      */
     private suspend fun sendMoSms(
         context: Context,
@@ -560,7 +560,7 @@ class GoogleConstellationClient(private val context: Context) {
 
     /**
      * Verify via Carrier ID: send SIM ISIM challenge to TelephonyManager.getIccAuthentication().
-     * Pure SIM-level crypto, no DG needed. Adapted from opstic's CarrierIdVerifier.
+     * Pure SIM-level crypto, no DG needed.
      */
     private fun verifyCarrierId(
         context: Context,
@@ -596,10 +596,10 @@ class GoogleConstellationClient(private val context: Context) {
                 )
             }
         } catch (e: SecurityException) {
-            Log.w(TAG, "CarrierID: SecurityException — ${e.message}")
+            Log.w(TAG, "CarrierID: SecurityException - ${e.message}")
             carrierIdError(google.internal.communications.phonedeviceverification.v1.CarrierIdError.CARRIER_ID_ERROR_UNABLE_TO_READ_SUBSCRIPTION)
         } catch (e: Exception) {
-            Log.e(TAG, "CarrierID: failed — ${e.message}")
+            Log.e(TAG, "CarrierID: failed - ${e.message}")
             carrierIdError(google.internal.communications.phonedeviceverification.v1.CarrierIdError.CARRIER_ID_ERROR_REFLECTION_ERROR)
         }
     }
@@ -959,7 +959,7 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // S163: DG Handle Reuse — stock GMS (bfox.java) creates ONE handle per session
+                // S163: DG Handle Reuse - stock GMS (bfox.java) creates ONE handle per session
                 // and calls snapshot() with different rpc bindings. microG was creating a new handle
                 // per RPC, which loses VM session state. Now we init once and reuse.
                 // dgHandle declared at runBlocking scope (above) for finally cleanup
@@ -977,7 +977,7 @@ class GoogleConstellationClient(private val context: Context) {
                         dgHandle = null
                         dgHandleFlow = null
                     }
-                    Log.i(TAG, "DG handle OPEN (flow=$dgFlow) — calling DroidGuardClientImpl.init()")
+                    Log.i(TAG, "DG handle OPEN (flow=$dgFlow) - calling DroidGuardClientImpl.init()")
                     val droidGuard = DroidGuardClientImpl(context)
                     Log.i(TAG, "DG client created, calling init($dgFlow)")
                     val handleTask = droidGuard.init(dgFlow, null)
@@ -985,7 +985,7 @@ class GoogleConstellationClient(private val context: Context) {
                     return try {
                         Log.i(TAG, "DG Tasks.await() START (30s timeout)")
                         val handle = Tasks.await(handleTask, 30, TimeUnit.SECONDS)
-                        Log.i(TAG, "DG Tasks.await() COMPLETED — handle=${handle?.javaClass?.simpleName}")
+                        Log.i(TAG, "DG Tasks.await() COMPLETED - handle=${handle?.javaClass?.simpleName}")
                         dgHandle = handle
                         dgHandleFlow = dgFlow
                         handle
@@ -1011,9 +1011,9 @@ class GoogleConstellationClient(private val context: Context) {
                 //   bewt.java:480 → "getConsent"
                 //   bewt.java:694 → "sync"
                 // Then bfox.java:80 → goyu.o("iidHash", c(str), "rpc", str2)
-                // DroidGuard HMAC-binds the token to these inputs — wrong value = server rejection
+                // DroidGuard HMAC-binds the token to these inputs - wrong value = server rejection
                 //
-                // S163: Uses handle reuse — init once, snapshot() per RPC (matches stock bfox pattern)
+                // S163: Uses handle reuse - init once, snapshot() per RPC (matches stock bfox pattern)
                 fun getDroidGuardToken(rpcMethod: String): String? {
                     Log.d(TAG, "getDroidGuardToken($rpcMethod) called")
 
@@ -1493,7 +1493,7 @@ class GoogleConstellationClient(private val context: Context) {
                     ""
                 }
 
-                // TelephonyInfo — verified against v26 bfqi.java:d() (S210)
+                // TelephonyInfo - verified against v26 bfqi.java:d() (S210)
                 val phoneTypeInt = when (telephonyManagerSub?.phoneType) {
                     TelephonyManager.PHONE_TYPE_GSM -> 1
                     TelephonyManager.PHONE_TYPE_CDMA -> 2
@@ -1666,8 +1666,8 @@ class GoogleConstellationClient(private val context: Context) {
                 val telephonyMsisdn = if (subscriptionMsisdn.isNotEmpty()) {
                     subscriptionMsisdn
                 } else {
-                    // SubscriptionInfo has no number — SIM truly has no stored number.
-                    // Do NOT fall back to getLine1Number() — Samsung returns wrong SIM's number.
+                    // SubscriptionInfo has no number - SIM truly has no stored number.
+                    // Do NOT fall back to getLine1Number() - Samsung returns wrong SIM's number.
                     Log.d(TAG, "SIM subId=$subId has no stored number (SubscriptionInfo.number empty)")
                     ""
                 }
@@ -1681,7 +1681,7 @@ class GoogleConstellationClient(private val context: Context) {
 
                 // ══════ PRE-FLIGHT PARANOID VALIDATION ══════
                 // Cross-check all resolved values before burning a server attempt.
-                // Each check logs WARN on mismatch but does NOT abort — server attempt
+                // Each check logs WARN on mismatch but does NOT abort - server attempt
                 // proceeds so we can observe the failure mode.
                 Log.i(TAG, "╔══ PRE-FLIGHT CHECKS ══╗")
 
@@ -1695,11 +1695,11 @@ class GoogleConstellationClient(private val context: Context) {
                 if (distinctNumbers.size > 1) {
                     Log.w(TAG, "║ ⚠ MSISDN MISMATCH across sources:")
                     allMsisdnSources.forEach { (src, num) -> Log.w(TAG, "║   $src = $num") }
-                    Log.w(TAG, "║   Using: $msisdn — verify this is correct!")
+                    Log.w(TAG, "║   Using: $msisdn - verify this is correct!")
                 } else if (msisdn.isNotEmpty()) {
                     Log.i(TAG, "║ ✓ MSISDN consistent: $msisdn (${allMsisdnSources.keys.joinToString("+")})")
                 } else {
-                    Log.w(TAG, "║ ⚠ MSISDN EMPTY from all sources — server will see empty number")
+                    Log.w(TAG, "║ ⚠ MSISDN EMPTY from all sources - server will see empty number")
                 }
 
                 // 2. IMSI cross-validation
@@ -1718,7 +1718,7 @@ class GoogleConstellationClient(private val context: Context) {
                 if (subscriptionInfo != null) {
                     Log.i(TAG, "║ ✓ Subscription: subId=$subId, slot=${subscriptionInfo.simSlotIndex}, carrier=${subscriptionInfo.carrierName}, iccId=${subscriptionInfo.iccId?.takeLast(5) ?: "null"}")
                 } else {
-                    Log.w(TAG, "║ ⚠ NO SubscriptionInfo for subId=$subId — SIM may be inactive")
+                    Log.w(TAG, "║ ⚠ NO SubscriptionInfo for subId=$subId - SIM may be inactive")
                 }
 
                 // 4. Phone number format validation (E.164)
@@ -1751,7 +1751,7 @@ class GoogleConstellationClient(private val context: Context) {
                 // calling_package is only added in V1 path (bevr.java:259). Messages uses V2.
                 mergedBundle.putString("calling_api", "verifyPhoneNumber")
                 // S180: force_provisioning=true tells server the user confirmed their number.
-                // S182: Was disabled (suspected of suppressing reason=5). S201: Re-enabled — reason=5
+                // S182: Was disabled (suspected of suppressing reason=5). S201: Re-enabled - reason=5
                 // never comes anyway (server returns reason=0), and S174 PENDING had force_provisioning.
                 if (!phoneNumber.isNullOrEmpty() && !mergedBundle.containsKey("force_provisioning")) {
                     mergedBundle.putString("force_provisioning", "true")
@@ -1760,7 +1760,7 @@ class GoogleConstellationClient(private val context: Context) {
                 // S182: Always declare OTP support. Without this, server returns reason=0
                 // (UNKNOWN) instead of reason=5 (PHONE_NUMBER_ENTRY_REQUIRED) or PENDING.
                 // Messages only includes one_time_verification for fresh SIMs, not previously
-                // provisioned ones — but server needs it to guide the OTP flow.
+                // provisioned ones - but server needs it to guide the OTP flow.
                 val forceOneTimeVerificationSetting = Settings.Global.getString(
                     context.contentResolver,
                     FORCE_ONE_TIME_VERIFICATION_KEY
@@ -1783,7 +1783,7 @@ class GoogleConstellationClient(private val context: Context) {
                 } else {
                     Log.i(TAG, "Caller already supplied one_time_verification=${mergedBundle.getString("one_time_verification")}")
                 }
-                // S164: Stock GMS does NOT add policy_id as a Param — it goes into
+                // S164: Stock GMS does NOT add policy_id as a Param - it goes into
                 // Verification.carrier_info.phone_number (bevm.java:1177). Remove test fallback.
                 val params = bundleToParams(mergedBundle)
                 Log.d(TAG, "Verification params: ${params.joinToString { "${it.name}=${it.value_}" }}")
@@ -2176,7 +2176,7 @@ class GoogleConstellationClient(private val context: Context) {
                 val verificationMethodInfo = VerificationMethodInfo(
                     // Stock GMS sends EMPTY methods list (Phenotype default=0 → no method added).
                     // Verified: bevm.java:246-261, captured hzdb_syncrequest has no field 7.1.
-                    // S108 discovery: we were sending [MT_SMS, TS43] — stock does NOT.
+                    // S108 discovery: we were sending [MT_SMS, TS43] - stock does NOT.
                     methods = emptyList(),
                     data_ = VerificationMethodData(value_ = smsToken)
                 )
@@ -2235,7 +2235,7 @@ class GoogleConstellationClient(private val context: Context) {
                             gmscore_version = GMSCORE_VERSION,
                             android_sdk_version = Build.VERSION.SDK_INT,
                             device_signals = if (syncToken != null) DeviceSignals(droidguard_token = syncToken) else DeviceSignals(),
-                            // NOTE: Do NOT set gaia_ids here — stock GMS never populates
+                            // NOTE: Do NOT set gaia_ids here - stock GMS never populates
                             // ClientInfo.field_9 in SyncRequest (verified via protoc --decode_raw
                             // comparison, 2026-02-16). Only field_12 (registered_app_ids) is used.
                             has_read_privileged_phone_state_permission = 1,
@@ -2280,7 +2280,7 @@ class GoogleConstellationClient(private val context: Context) {
                 // GMS bewt.java:480 passes lowercase method name as DG rpc binding
                 val getConsentToken = getDroidGuardToken("getConsent")
                 if (getConsentToken == null) {
-                    Log.w(TAG, "DroidGuard token for GetConsent FAILED — proceeding WITHOUT DG (no-DG-first strategy, S163 proved this works)")
+                    Log.w(TAG, "DroidGuard token for GetConsent FAILED - proceeding WITHOUT DG (no-DG-first strategy, S163 proved this works)")
                 }
 
                 val consentRequest = google.internal.communications.phonedeviceverification.v1.GetConsentRequest(
@@ -2434,10 +2434,10 @@ class GoogleConstellationClient(private val context: Context) {
                         // Instead, we call SetConsent directly to establish consent server-side.
                         //
                         // S163: API discovery doc says DeviceSignals "Required for Sync and Proceed calls
-                        // before client starts signing" — NOT listed for SetConsent. GMS has Phenotype flag
+                        // before client starts signing" - NOT listed for SetConsent. GMS has Phenotype flag
                         // Rpc__is_droid_guard_enabled_for_get_set_consent (default=true) proving server
                         // handles DG-free SetConsent. Try without DG first; if PERMISSION_DENIED, retry with DG.
-                        Log.w(TAG, "Consent NOT established (${consentResponse.device_consent?.consent}) — calling SetConsent(CONSENTED)...")
+                        Log.w(TAG, "Consent NOT established (${consentResponse.device_consent?.consent}) - calling SetConsent(CONSENTED)...")
                         try {
                             // S163: Build SetConsent request builder lambda (reused for both attempts)
                             fun buildSetConsentRequest(dgToken: String?): SetConsentRequest {
@@ -2494,7 +2494,7 @@ class GoogleConstellationClient(private val context: Context) {
                                 val code1 = if (e1 is com.squareup.wire.GrpcException) e1.grpcStatus.code else -1
                                 Log.w(TAG, "SetConsent without DG failed: grpc-status=$code1 ${e1.message}")
                                 if (code1 == 7) {
-                                    // PERMISSION_DENIED — retry with DG token
+                                    // PERMISSION_DENIED - retry with DG token
                                     Log.d(TAG, "SetConsent attempt 2: WITH DroidGuard token")
                                     val setConsentToken = getDroidGuardToken("setConsent")
                                     if (setConsentToken != null) {
@@ -2568,11 +2568,11 @@ class GoogleConstellationClient(private val context: Context) {
                                         cacheDroidGuardToken(resolveDroidGuardFlow("getConsent"), retryDg.droidguard_token!!, ttl, iidToken)
                                         Log.i(TAG, "  ARfb cached from retry! ${retryDg.droidguard_token!!.length} chars")
                                     } else {
-                                        Log.w(TAG, "  No ARfb in retry response — Sync will use raw DG token")
+                                        Log.w(TAG, "  No ARfb in retry response - Sync will use raw DG token")
                                     }
                                 }
                             } else {
-                                Log.w(TAG, "SetConsent failed — continuing to Sync (may fail)")
+                                Log.w(TAG, "SetConsent failed - continuing to Sync (may fail)")
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "SetConsent block failed: ${e.javaClass.simpleName}: ${e.message}")
@@ -2647,7 +2647,7 @@ class GoogleConstellationClient(private val context: Context) {
                                         gmscore_version_number = ci.gmscore_version_number,
                                         gmscore_version = ci.gmscore_version,
                                         android_sdk_version = ci.android_sdk_version,
-                                        device_signals = DeviceSignals(),  // Empty — no DG
+                                        device_signals = DeviceSignals(),  // Empty - no DG
                                         has_read_privileged_phone_state_permission = ci.has_read_privileged_phone_state_permission,
                                         registered_app_ids = ci.registered_app_ids,
                                         country_info = ci.country_info,
@@ -2724,7 +2724,7 @@ class GoogleConstellationClient(private val context: Context) {
                             continue
                         }
 
-                        // Non-retryable error or last attempt — rethrow for outer catch
+                        // Non-retryable error or last attempt - rethrow for outer catch
                         throw retryEx
                     }
                 }
@@ -2819,7 +2819,7 @@ class GoogleConstellationClient(private val context: Context) {
                             // Likely cause: IMSI was empty (S101 showed "imsi[0] empty" → NONE).
                             // With IMSI fix (S103), server should return PENDING instead on next attempt.
                             // Try GPNV as best-effort (for stock→microG swap where server has cached verification).
-                            Log.w(TAG, "NONE state — no verification exists for this SIM. IMSI was: ${if (imsi.isNotEmpty()) "present" else "EMPTY (likely cause)"}")
+                            Log.w(TAG, "NONE state - no verification exists for this SIM. IMSI was: ${if (imsi.isNotEmpty()) "present" else "EMPTY (likely cause)"}")
                             hasNone = true
                         }
                         else -> {
@@ -2866,7 +2866,7 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // 12b. FIX (S103): NONE state — best-effort GPNV for stock→microG swap, then check reason
+                // 12b. FIX (S103): NONE state - best-effort GPNV for stock→microG swap, then check reason
                 // Stock GMS handles NONE separately: stores record with state=NONE, calls GPNV as
                 // independent read-only query (bevv.java). If GPNV returns nothing, no token is provided.
                 if (hasNone && !hasVerified && !hasPending) {
@@ -2891,7 +2891,7 @@ class GoogleConstellationClient(private val context: Context) {
                             logJwtSummary("GPNV_NONE_BEST_EFFORT", jwt, firstNumber.phone_number)
                             return@runBlocking Ts43Client.EntitlementResult.success(jwt)
                         } else {
-                            Log.w(TAG, "GPNV returned nothing for NONE state — no cached verification exists")
+                            Log.w(TAG, "GPNV returned nothing for NONE state - no cached verification exists")
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "GPNV failed for NONE state: ${e.message}")
@@ -2901,7 +2901,7 @@ class GoogleConstellationClient(private val context: Context) {
                     // GMS enum hzdf: 0=UNKNOWN, 1=THROTTLED, 2=FAILED, 3=SKIPPED, 4=NOT_REQUIRED,
                     // 5=PHONE_NUMBER_ENTRY_REQUIRED, 6=INELIGIBLE, 7=DENIED, 8=NOT_IN_SERVICE.
                     // GMS (bevm.a EnumMap) maps reason→status code sent to Messages:
-                    //   5→7 (WaitingForManualMsisdnEntryState — phone number input UI)
+                    //   5→7 (WaitingForManualMsisdnEntryState - phone number input UI)
                     val noneVerification = responses.firstOrNull {
                         it.verification?.state == VerificationState.VERIFICATION_STATE_NONE
                     }?.verification
@@ -2912,27 +2912,27 @@ class GoogleConstellationClient(private val context: Context) {
                     // Stock GMS (bevm.a EnumMap) maps each reason to a specific status code:
                     //   0→0, 1→3(retry), 2→2(retry), 3→4, 4→5, 5→7(phone input), 6→8, 7→9, 8→10
                     // Returning status 7 for other reasons (e.g. THROTTLED=1) would show phone input
-                    // when Messages should be retrying — incorrect behavior.
+                    // when Messages should be retrying - incorrect behavior.
                     if (unverifiedReason == 5) {
-                        Log.i(TAG, "Server requests manual phone number entry (reason=5) — returning status 7")
+                        Log.i(TAG, "Server requests manual phone number entry (reason=5) - returning status 7")
                         return@runBlocking Ts43Client.EntitlementResult.phoneNumberEntryRequired("none-phone-number-entry-required")
                     }
 
-                    // Retryable reasons: UNKNOWN(0), THROTTLED(1), FAILED(2) — return 5002 so Messages retries
+                    // Retryable reasons: UNKNOWN(0), THROTTLED(1), FAILED(2) - return 5002 so Messages retries
                     // UNKNOWN(0) = server has no definitive answer yet, retry may get reason=5
                     if (unverifiedReason in listOf(0, 1, 2)) {
-                        Log.w(TAG, "NONE state retryable reason=$unverifiedReason — returning Status(5002) for retry")
+                        Log.w(TAG, "NONE state retryable reason=$unverifiedReason - returning Status(5002) for retry")
                         return@runBlocking Ts43Client.EntitlementResult.error("5002:none-state-reason-$unverifiedReason")
                     }
 
                     // Non-retryable: INELIGIBLE(6), DENIED(7), NOT_IN_SERVICE(8), etc.
-                    Log.w(TAG, "NONE state non-retryable reason=$unverifiedReason — returning Status(5001)")
+                    Log.w(TAG, "NONE state non-retryable reason=$unverifiedReason - returning Status(5001)")
                     return@runBlocking Ts43Client.EntitlementResult.error("5001:none-state-reason-$unverifiedReason")
                 }
 
-                // 13. Challenge dispatch loop (S211 — multi-type, multi-round)
+                // 13. Challenge dispatch loop (S211 - multi-type, multi-round)
                 if (hasPending) {
-                    Log.i(TAG, "Verification is PENDING — entering challenge dispatch loop")
+                    Log.i(TAG, "Verification is PENDING - entering challenge dispatch loop")
 
                     val pendingResponses = responses.filter {
                         it.verification?.state == VerificationState.VERIFICATION_STATE_PENDING
@@ -2993,7 +2993,7 @@ class GoogleConstellationClient(private val context: Context) {
                                         )
                                     )
                                 } else {
-                                    Log.w(TAG, "  MT_SMS: timeout after ${timeoutSec}s — proceeding with empty response")
+                                    Log.w(TAG, "  MT_SMS: timeout after ${timeoutSec}s - proceeding with empty response")
                                     // On timeout: proceed with empty response (server may transition to next challenge)
                                     google.internal.communications.phonedeviceverification.v1.ChallengeResponse(
                                         mt_challenge_response = google.internal.communications.phonedeviceverification.v1.MTChallengeResponse(
@@ -3012,7 +3012,7 @@ class GoogleConstellationClient(private val context: Context) {
                                     moSmsSent = true
                                     sendMoSms(context, moChallenge, subId)
                                 } else {
-                                    // Subsequent rounds with same MO_SMS: polling — server checks if SMS arrived.
+                                    // Subsequent rounds with same MO_SMS: polling - server checks if SMS arrived.
                                     // polling_intervals is comma-separated ms values (e.g., "4000,1000,1000,3000,5000")
                                     val pollDelays = moChallenge.polling_intervals?.split(",")?.mapNotNull { it.trim().toLongOrNull() } ?: emptyList()
                                     val pollIndex = (round - 2).coerceAtLeast(0)  // round 1 = send, round 2+ = poll

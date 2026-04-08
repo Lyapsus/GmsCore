@@ -20,8 +20,6 @@ open class HandleProxyFactory(private val context: Context) {
 
     fun createHandle(vmKey: String, pfd: ParcelFileDescriptor, extras: Bundle): HandleProxy {
         fetchFromFileDescriptor(pfd, vmKey)
-        // S220: libgcore_jni.so no longer loaded. Stock .unstable has zero extra native libs.
-        // nativeDlopenLazy/link_map unlink were only needed for loadStockNativeLibs (removed).
         return createHandleProxy(vmKey, extras)
     }
 
@@ -128,8 +126,8 @@ open class HandleProxyFactory(private val context: Context) {
 
     companion object {
         const val CLASS_NAME = "com.google.ccc.abuse.droidguard.DroidGuard"
-        // S220: Stock uses app_dg_cache/ (visible in /proc/self/maps). getDir("dg_cache") → app_dg_cache/
-        // Was "cache_dg" → app_cache_dg/ which was a non-stock path visible to DG's maps reader.
+        // Stock GMS uses app_dg_cache/ (visible in /proc/self/maps as a mapped path).
+        // getDir("dg_cache") creates app_dg_cache/ to match.
         const val CACHE_FOLDER_NAME = "dg_cache"
         val CLASS_LOCK = Object()
         @GuardedBy("CLASS_LOCK")

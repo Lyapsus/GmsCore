@@ -1,5 +1,5 @@
 /*
- * DroidGuard Introspection — captures what DG probes during VM execution.
+ * DroidGuard Introspection - captures what DG probes during VM execution.
  *
  * Phase 1: Java-level classloader + Context logging.
  *   Logs every loadClass/findClass call through our enriched classloader
@@ -11,9 +11,9 @@
  *   from native threads that bypass Java classloaders.
  *
  * Usage:
- *   DgIntrospect.startCapture(context)  — before DG class loading
- *   DgIntrospect.markPhase("RUN")       — before HandleProxy.run()
- *   DgIntrospect.stopCapture()          — after HandleProxy.close()
+ *   DgIntrospect.startCapture(context)  - before DG class loading
+ *   DgIntrospect.markPhase("RUN")       - before HandleProxy.run()
+ *   DgIntrospect.stopCapture()          - after HandleProxy.close()
  *   Log file: /data/data/com.google.android.gms/files/dg_introspect.log
  *
  * Enable:  adb shell "su -c 'touch /data/data/com.google.android.gms/files/dg_introspect_enable'"
@@ -41,7 +41,7 @@ object DgIntrospect {
 
     /**
      * Check if introspection is enabled (file-based opt-in).
-     * Zero overhead when disabled — just a File.exists() check.
+     * Zero overhead when disabled - just a File.exists() check.
      */
     fun isEnabled(context: Context): Boolean {
         return File(context.filesDir, "dg_introspect_enable").exists()
@@ -85,7 +85,7 @@ object DgIntrospect {
         val file = logFile ?: return
         try {
             PrintWriter(FileWriter(file, false)).use { pw ->
-                pw.println("# DG Introspect Log — ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(java.util.Date())}")
+                pw.println("# DG Introspect Log - ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(java.util.Date())}")
                 pw.println("# Format: elapsed_us|probe_num|tid|phase|tag|detail")
                 pw.println("# Phases: INIT=before DG load, LOAD=during class load, CONSTRUCT=DG constructor, RUN=DG.run(), CLOSE=after")
                 var entry = entries.poll()

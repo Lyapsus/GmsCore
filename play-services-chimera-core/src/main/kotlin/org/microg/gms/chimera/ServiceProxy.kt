@@ -125,7 +125,7 @@ abstract class ServiceProxy(private val loader: ServiceLoader) : android.app.Ser
     }
 
     override fun superGetForegroundServiceType(): Int {
-        return 0 // Default — no foreground service type
+        return 0 // Default - no foreground service type
     }
 
     override fun superOnCreate() {

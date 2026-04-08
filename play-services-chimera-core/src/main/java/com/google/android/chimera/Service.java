@@ -25,7 +25,7 @@ import java.io.PrintWriter;
  *     setProxyCallbacks, startForeground x2, stopForeground x2, stopSelf x2, stopSelfResult,
  *     getChimeraImpl, onLowMemory, onConfigurationChanged, onRebind, onTaskRemoved,
  *     onTrimMemory, onStart, dump)
- *   implements: yrv (getChimeraImpl), yru (setProxyCallbacks) — we use InstanceProvider
+ *   implements: yrv (getChimeraImpl), yru (setProxyCallbacks) - we use InstanceProvider
  */
 public abstract class Service extends ContextWrapper implements InstanceProvider {
     public static final int START_CONTINUATION_MASK = 0xf;
@@ -38,7 +38,7 @@ public abstract class Service extends ContextWrapper implements InstanceProvider
     public static final int STOP_FOREGROUND_DETACH = 2;
     public static final int STOP_FOREGROUND_REMOVE = 1;
 
-    // Stock: private ProxyCallbacks UT — single field
+    // Stock: private ProxyCallbacks UT - single field
     private ProxyCallbacks UT;
 
     public interface ProxyCallbacks {

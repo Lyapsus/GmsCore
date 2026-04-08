@@ -98,7 +98,7 @@ public class PhoneNumberVerification extends AbstractSafeParcelable {
     public static final int METHOD_REGISTERED_SMS = 7;
     public static final int METHOD_FLASH_CALL = 8;
     public static final int METHOD_TS43_AIDL = 9;     // TS43 in AIDL (proto gbqb.TS43 = 11, but AIDL uses 9)
-    public static final int METHOD_TS43 = 11;         // gbqb.TS43 proto value — DO NOT use in PhoneNumberVerification
+    public static final int METHOD_TS43 = 11;         // gbqb.TS43 proto value - DO NOT use in PhoneNumberVerification
 
     // Error code (field 4) - bayl.java:15 defaults to -1, line 41 validates >= 0 or == -1
     public static final int ERROR_NONE = -1;

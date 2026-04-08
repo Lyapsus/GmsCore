@@ -187,7 +187,7 @@ message GetConsentResponse {
 }
 
 // SetConsentRequest is the request to set consent
-// Field numbers verified against GMS v26.02.33 decode_hnmt (hzcv.java) — S162
+// Field numbers verified against GMS v26.02.33 decode_hnmt (hzcv.java) - S162
 message SetConsentRequest {
   // (Required)
   RequestHeader header = 1;
@@ -702,7 +702,7 @@ message ChallengeID {
 // MT Challenge
 message MTChallenge {
   // Server sends binary data here (NOT valid UTF-8). Must use bytes to preserve
-  // original wire content — string would corrupt via UTF-8 round-trip (U+FFFD replacement).
+  // original wire content - string would corrupt via UTF-8 round-trip (U+FFFD replacement).
   // Root cause of Proceed gRPC UNKNOWN error (S172).
   bytes message_substring = 1;
 }
@@ -1334,7 +1334,7 @@ message TelephonyInfo {
   // ServiceState: IN_SERVICE→1, OUT_OF_SERVICE→2, EMERGENCY_ONLY→3, POWER_OFF→4
   int32 service_state = 16;
 
-  // Conditional on Phenotype flags — microG omits (correct)
+  // Conditional on Phenotype flags - microG omits (correct)
   repeated TelephonyCapabilityInfo capability_infos = 17;
   repeated TelephonyStateInfo state_infos = 18;
   repeated TelephonyPermissionInfo permission_infos = 19;

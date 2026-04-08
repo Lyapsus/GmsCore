@@ -1,6 +1,6 @@
 package org.microg.gms.droidguard
 
-/** Stock GMS v26.02.33 requestedPermissions — 386 entries. */
+/** Stock GMS v26.02.33 requestedPermissions - 386 entries. */
 object StockGmsData {
     val PERMISSIONS = arrayOf(
         "android.car.permission.CAR_ENERGY",
