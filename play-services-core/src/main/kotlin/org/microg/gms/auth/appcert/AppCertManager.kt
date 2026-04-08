@@ -14,19 +14,12 @@ import com.android.volley.Request
 import com.android.volley.Response
 import com.android.volley.VolleyError
 import com.android.volley.toolbox.Volley
-import com.google.android.gms.BuildConfig
 import com.google.android.gms.droidguard.DroidGuardClient
 import com.google.android.gms.tasks.await
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okio.ByteString.Companion.of
-import org.microg.gms.checkin.LastCheckinInfo
-import org.microg.gms.common.Constants
-import org.microg.gms.gcm.GcmConstants
-import org.microg.gms.gcm.GcmDatabase
-import org.microg.gms.gcm.RegisterRequest
-import org.microg.gms.gcm.completeRegisterRequest
 import org.microg.gms.profile.Build
 import org.microg.gms.profile.ProfileManager
 import org.microg.gms.settings.SettingsContract.CheckIn
@@ -44,13 +37,29 @@ class AppCertManager(private val context: Context) {
 
     private fun readDeviceKey() {
         try {
-            if (context.getFileStreamPath("device_key").exists()) {
-                deviceKey = context.openFileInput("device_key").use { DeviceKey.ADAPTER.decode(it) }
-                deviceKeyCacheTime = context.getFileStreamPath("device_key").lastModified()
+            val keyFile = context.getFileStreamPath("device_key")
+            if (keyFile.exists()) {
+                if (keyFile.length() == 0L) {
+                    Log.w(TAG, "device_key is 0 bytes, deleting stale file")
+                    keyFile.delete()
+                    deviceKeyCacheTime = -1
+                    return
+                }
+                val key = context.openFileInput("device_key").use { DeviceKey.ADAPTER.decode(it) }
+                if (key.macSecret == null) {
+                    Log.w(TAG, "device_key has no macSecret, deleting invalid file")
+                    keyFile.delete()
+                    deviceKey = null
+                    deviceKeyCacheTime = -1
+                    return
+                }
+                deviceKey = key
+                deviceKeyCacheTime = keyFile.lastModified()
             } else {
                 deviceKeyCacheTime = -1
             }
         } catch (e: Exception) {
+            Log.w(TAG, "Failed to read device_key", e)
             deviceKeyCacheTime = -1
         }
     }
@@ -66,14 +75,26 @@ class AppCertManager(private val context: Context) {
                 }
                 Log.w(TAG, "DeviceKeys for app certifications are experimental")
                 deviceKeyCacheTime = currentTime
-                val lastCheckinInfo = LastCheckinInfo.read(context)
-                val androidId = lastCheckinInfo.androidId
+                // Stock GMS reads android_id from GServices ContentProvider
+                // (content://com.google.android.gsf.gservices key "android_id") via
+                // belp.d() → belo.b() → bdno.b(belp.d) → fngx.c(). This is the CHECKIN
+                // android_id assigned during device registration, NOT Settings.Secure.ANDROID_ID.
+                // microG stores this in SettingsContract.CheckIn.ANDROID_ID.
+                val checkinAndroidId = try {
+                    getSettings(context, CheckIn.getContentUri(context), arrayOf(CheckIn.ANDROID_ID)) { cursor: Cursor -> cursor.getLong(0) }
+                } catch (e: Exception) { 0L }
+                if (checkinAndroidId == 0L) {
+                    Log.w(TAG, "Checkin not completed (android_id=0), cannot fetch device_key")
+                    deviceKeyCacheTime = 0
+                    return false
+                }
+                val androidIdHex = java.lang.Long.toHexString(checkinAndroidId)
                 val sessionId = Random.nextLong()
                 // Stock GMS v26.02.33 version code — devicekey server validates this
                 val stockGmsVersionCode = 260233029
                 val data = hashMapOf(
-                        "dg_androidId" to androidId.toString(16),
-                        "dg_session" to sessionId.toString(16),
+                        "dg_androidId" to androidIdHex,
+                        "dg_session" to java.lang.Long.toHexString(sessionId),
                         "dg_gmsCoreVersion" to stockGmsVersionCode.toString(),
                         "dg_sdkVersion" to Build.VERSION.SDK_INT.toString()
                 )
@@ -82,29 +103,30 @@ class AppCertManager(private val context: Context) {
                 } catch (e: Exception) {
                     null
                 }
-                val token = completeRegisterRequest(context, GcmDatabase(context), RegisterRequest().build(context)
-                        .checkin(lastCheckinInfo)
-                        .app("com.google.android.gms", Constants.GMS_PACKAGE_SIGNATURE_SHA1, stockGmsVersionCode)
-                        .sender(REGISTER_SENDER)
-                        .extraParam("subscription", REGISTER_SUBSCRIPTION)
-                        .extraParam("X-subscription", REGISTER_SUBSCRIPTION)
-                        .extraParam("subtype", REGISTER_SUBTYPE)
-                        .extraParam("X-subtype", REGISTER_SUBTYPE)
-                        .extraParam("scope", REGISTER_SCOPE))
-                        .getString(GcmConstants.EXTRA_REGISTRATION_ID)
+                // Stock GMS (ajoq.b bytecode) sends literal "missing_token" — no FCM registration
                 val request = DeviceKeyRequest(
                         droidGuardResult = droidGuardResult,
-                        androidId = lastCheckinInfo.androidId,
+                        androidId = checkinAndroidId,
                         sessionId = sessionId,
                         versionInfo = DeviceKeyRequest.VersionInfo(Build.VERSION.SDK_INT, stockGmsVersionCode),
-                        token = token
+                        token = "missing_token"
                 )
-                Log.d(TAG, "Request: ${request.toString().chunked(128).joinToString("\n")}")
+                Log.d(TAG, "androidId hex=$androidIdHex long=$checkinAndroidId session=${java.lang.Long.toHexString(sessionId)}")
+                val bodyBytes = request.encode()
+                Log.d(TAG, "Request body: ${bodyBytes.size} bytes, hex=${bodyBytes.take(64).joinToString("") { "%02x".format(it) }}...")
+                // Debug: save raw request body for curl testing
+                try {
+                    val dumpFile = java.io.File(context.filesDir, "devicekey_request.bin")
+                    dumpFile.writeBytes(bodyBytes)
+                    Log.d(TAG, "Saved request body to ${dumpFile.absolutePath}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to save request body: ${e.message}")
+                }
                 val deferredResponse = CompletableDeferred<ByteArray?>()
                 queue.add(object : Request<ByteArray?>(Method.POST, "https://android.googleapis.com/auth/devicekey", null) {
                     override fun getBody(): ByteArray = request.encode()
 
-                    override fun getBodyContentType(): String = "application/octet-stream"
+                    override fun getBodyContentType(): String = "application/x-protobuf"
 
                     override fun parseNetworkResponse(response: NetworkResponse): Response<ByteArray?> {
                         return if (response.statusCode == 200) {
@@ -115,8 +137,10 @@ class AppCertManager(private val context: Context) {
                     }
 
                     override fun deliverError(error: VolleyError) {
-                        if (error.networkResponse != null) {
-                            Log.d(TAG, "Error: ${Base64.encodeToString(error.networkResponse.data, 2)}")
+                        val nr = error.networkResponse
+                        if (nr != null) {
+                            val body = nr.data?.let { String(it, Charsets.UTF_8) } ?: ""
+                            Log.d(TAG, "HTTP ${nr.statusCode}: ${body.take(500)}")
                         } else {
                             Log.d(TAG, "Error: ${error.message}")
                         }
@@ -129,12 +153,21 @@ class AppCertManager(private val context: Context) {
                     }
 
                     override fun getHeaders(): Map<String, String> {
-                        return mapOf(
-                                "User-Agent" to "GoogleAuth/1.4 (${Build.DEVICE} ${Build.ID}); gzip",
-                                "content-type" to "application/octet-stream",
+                        // Stock bddx.d() sets: device, app, gmsversion, gmscoreFlow.
+                        // Stock Cronet adds User-Agent at native level.
+                        // Wire capture (capture_full_bodies.flow): exact stock headers that got HTTP 200.
+                        // Content-Type set via getBodyContentType().
+                        val headers = mapOf(
                                 "app" to "com.google.android.gms",
-                                "device" to androidId.toString(16)
+                                "device" to androidIdHex,
+                                "gmsversion" to stockGmsVersionCode.toString(),
+                                "gmscoreflow" to "3",
+                                "User-Agent" to "com.google.android.gms/$stockGmsVersionCode (Linux; U; Android ${android.os.Build.VERSION.RELEASE}; ${java.util.Locale.getDefault()}; ${Build.MODEL}; Build/${Build.ID}; Cronet/144.0.7509.3)"
                         )
+                        for ((k, v) in headers) {
+                            Log.d(TAG, "Header: $k: $v")
+                        }
+                        return headers
                     }
                 })
                 val deviceKeyBytes = deferredResponse.await() ?: return false
@@ -181,7 +214,6 @@ class AppCertManager(private val context: Context) {
                     packageInfo = SpatulaHeaderProto.PackageInfo(packageName, packageCertificateHash),
                     deviceId = androidId
             )
-            return null // TODO
         }
         Log.d(TAG, "Spatula Header: $proto")
         return Base64.encodeToString(proto.encode(), Base64.NO_WRAP)
@@ -190,10 +222,6 @@ class AppCertManager(private val context: Context) {
     companion object {
         private const val TAG = "AppCertManager"
         private const val DEVICE_KEY_TIMEOUT = 60 * 60 * 1000L
-        private const val REGISTER_SENDER = "745476177629"
-        private const val REGISTER_SUBTYPE = "745476177629"
-        private const val REGISTER_SUBSCRIPTION = "745476177629"
-        private const val REGISTER_SCOPE = "DeviceKeyRequest"
         private val deviceKeyLock = Mutex()
         private var deviceKey: DeviceKey? = null
         private var deviceKeyCacheTime = 0L

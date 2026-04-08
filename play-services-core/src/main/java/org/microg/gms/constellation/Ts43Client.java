@@ -101,23 +101,47 @@ public class Ts43Client {
         public final String token;
         public final boolean ineligible;
         public final String reason;
+        /** Original exception for error mapping. Stock GMS (bevw.java:36-52) maps
+         *  gRPC exceptions to Status(500x) codes. Carried so ConstellationServiceImpl
+         *  can replicate the same mapping. null for success/ineligible/non-exception errors. */
+        public final Throwable cause;
+        /** When true, server returned PHONE_NUMBER_ENTRY_REQUIRED (reason=5).
+         *  Maps to verificationStatus=7 → Messages shows phone number input UI. */
+        public final boolean needsManualMsisdn;
 
-        private EntitlementResult(String token, boolean ineligible, String reason) {
+        private EntitlementResult(String token, boolean ineligible, String reason, Throwable cause, boolean needsManualMsisdn) {
             this.token = token;
             this.ineligible = ineligible;
             this.reason = reason;
+            this.cause = cause;
+            this.needsManualMsisdn = needsManualMsisdn;
         }
 
         public static EntitlementResult success(String token) {
-            return new EntitlementResult(token, false, "success");
+            return new EntitlementResult(token, false, "success", null, false);
         }
 
         public static EntitlementResult ineligible(String token, String reason) {
-            return new EntitlementResult(token, true, reason);
+            return new EntitlementResult(token, true, reason, null, false);
         }
 
         public static EntitlementResult error(String reason) {
-            return new EntitlementResult(null, false, reason);
+            return new EntitlementResult(null, false, reason, null, false);
+        }
+
+        public static EntitlementResult error(String reason, Throwable cause) {
+            return new EntitlementResult(null, false, reason, cause, false);
+        }
+
+        /** Server says user must manually enter phone number (UnverifiedReason=5).
+         *  Maps to verificationStatus=7 → Messages shows phone input UI → re-calls verifyPhoneNumber. */
+        public static EntitlementResult phoneNumberEntryRequired(String reason) {
+            return new EntitlementResult(null, false, reason, null, true);
+        }
+
+        /** True when this result represents an error (no token, not ineligible, not manual MSISDN). */
+        public boolean isError() {
+            return !ineligible && !needsManualMsisdn && (token == null || token.isEmpty());
         }
     }
 

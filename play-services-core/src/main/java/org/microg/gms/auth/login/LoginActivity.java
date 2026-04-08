@@ -511,9 +511,11 @@ public class LoginActivity extends AssistantActivity {
                 if (email != null) {
                     bindings.put("dg_email", email);
                 }
-                // Get Android ID like GMS does
-                String androidId = Long.toHexString(LastCheckinInfo.read(this).getAndroidId());
-                bindings.put("dg_androidId", androidId);
+                // Get Android ID like GMS does (skip if checkin hasn't happened yet)
+                long androidIdLong = LastCheckinInfo.read(this).getAndroidId();
+                if (androidIdLong > 0) {
+                    bindings.put("dg_androidId", Long.toHexString(androidIdLong));
+                }
                 bindings.put("dg_gmsCoreVersion", String.valueOf(Constants.GMS_VERSION_CODE));
                 bindings.put("dg_package", getPackageName());
 

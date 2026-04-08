@@ -180,4 +180,28 @@ public class ConstellationServiceImplTest {
     public void mapMethodString_unknown_defaultsToTs43Aidl() {
         assertEquals(PhoneNumberVerification.METHOD_TS43_AIDL, ConstellationServiceImpl.mapVerificationMethodString("SOMETHING_NEW"));
     }
+
+    // --- EntitlementResult.needsManualMsisdn tests ---
+
+    @Test
+    public void entitlementResult_phoneNumberEntryRequired_isNotError() {
+        Ts43Client.EntitlementResult result = Ts43Client.EntitlementResult.phoneNumberEntryRequired("test-reason");
+        assertEquals(false, result.isError());
+        assertEquals(true, result.needsManualMsisdn);
+        assertEquals(null, result.token);
+    }
+
+    @Test
+    public void entitlementResult_error_isError() {
+        Ts43Client.EntitlementResult result = Ts43Client.EntitlementResult.error("test-error");
+        assertEquals(true, result.isError());
+        assertEquals(false, result.needsManualMsisdn);
+    }
+
+    @Test
+    public void entitlementResult_success_isNotError() {
+        Ts43Client.EntitlementResult result = Ts43Client.EntitlementResult.success("jwt-token");
+        assertEquals(false, result.isError());
+        assertEquals(false, result.needsManualMsisdn);
+    }
 }

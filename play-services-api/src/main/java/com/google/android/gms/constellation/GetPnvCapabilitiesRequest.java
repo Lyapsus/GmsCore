@@ -16,27 +16,27 @@ import java.util.List;
 /**
  * Request to get phone number verification (PNV) capabilities.
  *
- * Fields:
- * - packageName: The calling app's package name
- * - phoneNumbers: List of phone numbers to check capabilities for
- * - subscriptionIds: List of subscription IDs to check
+ * Fields verified against GMS decompilation:
+ * - field 1: policyId — UPI policy string
+ * - field 2: verificationMethods — List of method IDs to check
+ * - field 3: subscriptionIds — List of subscription IDs
  */
 @SafeParcelable.Class
 public class GetPnvCapabilitiesRequest extends AbstractSafeParcelable {
     @Field(1)
-    public String packageName;
+    public String policyId;
     @Field(2)
-    public List<String> phoneNumbers;
+    public List<Integer> verificationMethods;
     @Field(3)
-    public List<Long> subscriptionIds;
+    public List<Integer> subscriptionIds;
 
     @Constructor
     public GetPnvCapabilitiesRequest(
-            @Param(1) String packageName,
-            @Param(2) List<String> phoneNumbers,
-            @Param(3) List<Long> subscriptionIds) {
-        this.packageName = packageName;
-        this.phoneNumbers = phoneNumbers;
+            @Param(1) String policyId,
+            @Param(2) List<Integer> verificationMethods,
+            @Param(3) List<Integer> subscriptionIds) {
+        this.policyId = policyId;
+        this.verificationMethods = verificationMethods;
         this.subscriptionIds = subscriptionIds;
     }
 

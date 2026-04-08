@@ -12,8 +12,11 @@ import com.google.android.gms.common.api.internal.IStatusCallback
 import com.google.android.gms.common.internal.GetServiceRequest
 import com.google.android.gms.common.internal.IGmsCallbacks
 import com.google.android.gms.phenotype.*
+import com.google.android.gms.phenotype.internal.IGetStorageInfoCallbacks
 import com.google.android.gms.phenotype.internal.IPhenotypeCallbacks
 import com.google.android.gms.phenotype.internal.IPhenotypeService
+import com.google.android.gms.common.Feature
+import com.google.android.gms.common.internal.ConnectionInfo
 import org.microg.gms.BaseService
 import org.microg.gms.common.GmsService
 import org.microg.gms.common.PackageUtils
@@ -21,23 +24,35 @@ import org.microg.gms.utils.warnOnTransactionIssues
 
 private const val TAG = "PhenotypeService"
 
+private val FEATURES = arrayOf(
+    Feature("commit_to_configuration_v2_api", 1),
+    Feature("get_serving_version_api", 1),
+    Feature("get_experiment_tokens_api", 1),
+    Feature("register_flag_update_listener_api", 2),
+    Feature("sync_after_api", 1),
+    Feature("sync_after_for_application_api", 1),
+    Feature("set_app_wide_properties_api", 1),
+    Feature("set_runtime_properties_api", 1),
+    Feature("get_storage_info_api", 1),
+)
+
 class PhenotypeService : BaseService(TAG, GmsService.PHENOTYPE) {
     override fun handleServiceRequest(callback: IGmsCallbacks, request: GetServiceRequest?, service: GmsService?) {
         val packageName = PackageUtils.getAndCheckCallingPackage(this, request?.packageName)
-        callback.onPostInitComplete(0, PhenotypeServiceImpl(packageName).asBinder(), null)
+        callback.onPostInitCompleteWithConnectionInfo(0, PhenotypeServiceImpl(packageName).asBinder(), ConnectionInfo().apply {
+            features = FEATURES
+        })
     }
 }
 
 private val RCS_PROVISIONING_FLAGS = arrayOf(
     Flag("RcsProvisioning__min_gmscore_version_for_upi_without_acs_fallback_met", true, 0),
     Flag("RcsProvisioning__allow_manual_phone_number_input", true, 0),
-    Flag("RcsFlags__acs_url", "https://config.rcs.mnc017.mcc232.jibecloud.net/", 0),  // Spusu ACS URL
-    // CRITICAL: Enable the provisioning_acs_url_override file functionality
-    // Without this, Messages ignores the override file even if it exists
+    // acs_url empty per stock GMS — URL comes from mcc_url_format template
+    Flag("RcsFlags__acs_url", "", 0),
+    // mcc_url_format: carrier-generic Jibe URL template (%s = MCC). Verified from stock GMS PhenotypePrefs.xml.
+    Flag("RcsFlags__mcc_url_format", "rcs-acs-mcc%s.jibe.google.com", 0),
     Flag("RcsFlags__allow_overrides", true, 0),
-    // ENABLED: UPI path so Messages calls our Constellation service
-    // Our service then calls Google's real API to trigger OTP SMS
-    // and get a properly signed JWT token
     Flag("RcsProvisioning__enable_upi", true, 0),
     Flag("RcsProvisioning__enable_upi_mvp", true, 0),
     Flag("RcsProvisioning__enable_client_attestation_check", false, 0),
@@ -100,12 +115,12 @@ private val CONFIGURATION_OPTIONS = mapOf(
 
 class PhenotypeServiceImpl(val packageName: String?) : IPhenotypeService.Stub() {
     override fun register(callbacks: IPhenotypeCallbacks, packageName: String?, version: Int, p3: Array<out String>?, p4: ByteArray?) {
-        Log.d(TAG, "register($packageName, $version, $p3, $p4)")
+        Log.d(TAG, "register($packageName, version=$version, p3=${p3?.contentToString()}, callingUid=${android.os.Binder.getCallingUid()})")
         callbacks.onRegistered(if (version != 0) Status.SUCCESS else Status.CANCELED)
     }
 
     override fun weakRegister(callbacks: IPhenotypeCallbacks, packageName: String?, version: Int, p3: Array<out String>?, p4: IntArray?, p5: ByteArray?) {
-        Log.d(TAG, "weakRegister($packageName, $version, $p3, $p4, $p5)")
+        Log.d(TAG, "weakRegister($packageName, version=$version, p3=${p3?.contentToString()}, callingUid=${android.os.Binder.getCallingUid()})")
         callbacks.onWeakRegistered(Status.SUCCESS)
     }
 
@@ -144,7 +159,16 @@ class PhenotypeServiceImpl(val packageName: String?) : IPhenotypeService.Stub() 
 
     override fun getCommitedConfiguration(callbacks: IPhenotypeCallbacks, packageName: String?) {
         Log.d(TAG, "getCommitedConfiguration($packageName)")
-        callbacks.onCommittedConfiguration(Status.SUCCESS, configurationsResult())
+        if (packageName in CONFIGURATION_OPTIONS.keys) {
+            val flags = CONFIGURATION_OPTIONS[packageName]
+            callbacks.onCommittedConfiguration(Status.SUCCESS, configurationsResult(arrayOf(Configuration().apply {
+                id = 0
+                this.flags = flags
+                removeNames = emptyArray()
+            })))
+        } else {
+            callbacks.onCommittedConfiguration(Status.SUCCESS, configurationsResult())
+        }
     }
 
     override fun getConfigurationSnapshotWithToken(callbacks: IPhenotypeCallbacks, packageName: String?, user: String?, p3: String?) {
@@ -168,8 +192,19 @@ class PhenotypeServiceImpl(val packageName: String?) : IPhenotypeService.Stub() 
     }
 
     override fun registerSync(callbacks: IPhenotypeCallbacks, packageName: String?, version: Int, p3: Array<out String>?, p4: ByteArray?, p5: String?, p6: String?) {
-        Log.d(TAG, "registerSync($packageName, $version, $p3, $p4, $p5, $p6)")
-        callbacks.onConfiguration(Status.SUCCESS, configurationsResult())
+        Log.d(TAG, "registerSync($packageName, $version, $p3, $p5, $p6)")
+        val key = packageName ?: ""
+        val flags = CONFIGURATION_OPTIONS[key]
+        if (flags != null) {
+            Log.d(TAG, "registerSync: serving ${flags.size} flags for $key")
+            callbacks.onConfiguration(Status.SUCCESS, configurationsResult(arrayOf(Configuration().apply {
+                id = 0
+                this.flags = flags
+                removeNames = emptyArray()
+            })))
+        } else {
+            callbacks.onConfiguration(Status.SUCCESS, configurationsResult())
+        }
     }
 
     override fun setFlagOverrides(callbacks: IPhenotypeCallbacks, packageName: String?, user: String?, flagName: String?, flagType: Int, flagDataType: Int, flagValue: String?) {
@@ -220,6 +255,22 @@ class PhenotypeServiceImpl(val packageName: String?) : IPhenotypeService.Stub() 
 
     override fun setRuntimeProperties(callbacks: IStatusCallback?, p1: String?, p2: ByteArray?) {
         Log.d(TAG, "Not yet implemented: setRuntimeProperties")
+    }
+
+    override fun commitToConfigurationV2(callbacks: IPhenotypeCallbacks, data: ByteArray?) {
+        Log.d(TAG, "commitToConfigurationV2(${data?.size ?: 0} bytes)")
+        // Return error 29501 — triggers SDK fallback to getConfigurationSnapshotWithToken(),
+        // which returns our flags with a non-empty snapshotToken. The SDK then writes the
+        // .pb marker file to the calling app's phenotype/shared/ dir, making flags visible.
+        callbacks.onCommitedToConfiguration(Status(29501))
+    }
+
+    override fun getStorageInfo(callbacks: IGetStorageInfoCallbacks?) {
+        Log.d(TAG, "getStorageInfo(callingPackage=$packageName)")
+        // Return error 29514 — same as stock GMS returns for unsupported callers (Play Store).
+        // All clients (Messages ConfigurationUpdater, RegisterInternal) handle 29514 gracefully
+        // by creating a timestamp-only fallback StorageInfo.
+        callbacks?.onStorageInfo(Status(29514), null)
     }
 
     override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean =

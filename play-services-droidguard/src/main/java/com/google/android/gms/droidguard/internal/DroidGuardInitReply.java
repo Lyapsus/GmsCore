@@ -36,10 +36,12 @@ public class DroidGuardInitReply implements Parcelable {
         public DroidGuardInitReply createFromParcel(Parcel source) {
             ParcelFileDescriptor pfd = source.readParcelable(ParcelFileDescriptor.class.getClassLoader());
             Parcelable object = source.readParcelable(getClass().getClassLoader());
-            if (pfd != null && object != null) {
-                return new DroidGuardInitReply(pfd, object);
-            }
-            return null;
+            // Always return a non-null reply. The old code returned null when pfd/object
+            // were null, causing DroidGuardApiClient.openHandle() to fall back to init()
+            // which calls initWithRequest(flow, null) — losing the DroidGuardResultsRequest
+            // Bundle (clientVersion, appArchitecture). The VM uses this Bundle to decide
+            // what telemetry to collect: null Bundle → minimal mode → 21K tokens.
+            return new DroidGuardInitReply(pfd, object);
         }
 
         @Override

@@ -33,8 +33,9 @@ public class ConfigurationProvider extends ContentProvider {
     private static final String FLAG_ENABLE_UPI = "RcsProvisioning__enable_upi";
     private static final String FLAG_ENABLE_UPI_MVP = "RcsProvisioning__enable_upi_mvp";
     private static final String FLAG_ACS_URL = "RcsFlags__acs_url";
-    private static final String SPUSU_ACS_URL = "https://config.rcs.mnc017.mcc232.jibecloud.net/";
-    // CRITICAL: allow_overrides enables the provisioning_acs_url_override file
+    // mcc_url_format: carrier-generic Jibe URL template (%s = MCC). Verified from stock GMS PhenotypePrefs.xml.
+    private static final String FLAG_MCC_URL_FORMAT = "RcsFlags__mcc_url_format";
+    private static final String JIBE_MCC_URL_FORMAT = "rcs-acs-mcc%s.jibe.google.com";
     private static final String FLAG_ALLOW_OVERRIDES = "RcsFlags__allow_overrides";
     private static final String FLAG_TRUE = "true";
     private static final String FLAG_FALSE = "false";
@@ -62,12 +63,12 @@ public class ConfigurationProvider extends ContentProvider {
             // and get a properly signed JWT token
             cursor.addRow(new Object[]{FLAG_ENABLE_UPI, FLAG_TRUE});
             cursor.addRow(new Object[]{FLAG_ENABLE_UPI_MVP, FLAG_TRUE});
-            cursor.addRow(new Object[]{FLAG_ACS_URL, SPUSU_ACS_URL});  // Spusu ACS URL
+            cursor.addRow(new Object[]{FLAG_ACS_URL, ""});  // empty per stock GMS — URL from mcc_url_format
+            cursor.addRow(new Object[]{FLAG_MCC_URL_FORMAT, JIBE_MCC_URL_FORMAT});
             cursor.addRow(new Object[]{"RcsProvisioning__enable_client_attestation_check", FLAG_FALSE});
             cursor.addRow(new Object[]{"RcsProvisioning__enable_client_attestation_check_v2", FLAG_FALSE});
-            // CRITICAL: Enable the provisioning_acs_url_override file functionality
             cursor.addRow(new Object[]{FLAG_ALLOW_OVERRIDES, FLAG_TRUE});
-            Log.d(TAG, "Serving RCS phenotype flags (UPI ENABLED, ACS URL, ALLOW_OVERRIDES) for " + packageName);
+            Log.d(TAG, "Serving RCS phenotype flags (UPI ENABLED, mcc_url_format) for " + packageName);
         }
         return cursor;
     }

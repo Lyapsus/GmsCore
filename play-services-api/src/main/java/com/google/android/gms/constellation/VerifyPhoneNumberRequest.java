@@ -14,28 +14,25 @@ import com.google.android.gms.common.internal.safeparcel.SafeParcelableCreatorAn
 
 import java.util.List;
 
-// NOTE: GMS VerifyPhoneNumberRequest field 5 is List<ImsiRequest>, NOT SimCapability.
-
 /**
  * Request to verify a phone number via Constellation.
  *
- * Based on decompiled GMS, fields:
- * - phoneNumber: Phone number to verify (E.164 format)
-     * - subscriptionId: SIM subscription ID
-     * - idTokenRequest: Optional request for ID token
-     * - extras: Additional parameters
-     * - imsiRequests: List of IMSI requests (ImsiRequest)
-     * - allowFallback: Whether to allow fallback verification methods
-     * - verificationType: Preferred verification type
-     * - verificationCapabilities: Supported verification methods
-
+ * Field names verified against GMS decompilation (bevr.java, dkkx.java):
+ * - field 1: policyId — UPI policy string (e.g., "upi-carrier-id-mt-priority"), NOT phone number
+ * - field 2: timeout — always 0L from Messages (dkkx.java:39)
+ * - field 3: idTokenRequest — audience + nonce for JWT
+ * - field 4: extras — Bundle with session_id, consent_type, force_provisioning, etc.
+ * - field 5: imsiRequests — List of IMSI/MSISDN pairs per SIM
+ * - field 6: allowFallback — whether fallback verification methods are allowed
+ * - field 7: verificationType — preferred verification type
+ * - field 8: verificationCapabilities — supported verification methods (List<Integer>)
  */
 @SafeParcelable.Class
 public class VerifyPhoneNumberRequest extends AbstractSafeParcelable {
     @Field(1)
-    public String phoneNumber;
+    public String policyId;
     @Field(2)
-    public long subscriptionId;
+    public long timeout;
     @Field(3)
     public IdTokenRequest idTokenRequest;
     @Field(4)
@@ -47,20 +44,20 @@ public class VerifyPhoneNumberRequest extends AbstractSafeParcelable {
     @Field(7)
     public int verificationType;
     @Field(8)
-    public List<VerificationCapability> verificationCapabilities;
+    public List<Integer> verificationCapabilities;
 
     @Constructor
     public VerifyPhoneNumberRequest(
-            @Param(1) String phoneNumber,
-            @Param(2) long subscriptionId,
+            @Param(1) String policyId,
+            @Param(2) long timeout,
             @Param(3) IdTokenRequest idTokenRequest,
             @Param(4) Bundle extras,
             @Param(5) List<ImsiRequest> imsiRequests,
             @Param(6) boolean allowFallback,
             @Param(7) int verificationType,
-            @Param(8) List<VerificationCapability> verificationCapabilities) {
-        this.phoneNumber = phoneNumber;
-        this.subscriptionId = subscriptionId;
+            @Param(8) List<Integer> verificationCapabilities) {
+        this.policyId = policyId;
+        this.timeout = timeout;
         this.idTokenRequest = idTokenRequest;
         this.extras = extras;
         this.imsiRequests = imsiRequests;

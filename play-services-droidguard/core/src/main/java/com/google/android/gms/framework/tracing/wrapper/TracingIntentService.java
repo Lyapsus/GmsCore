@@ -7,51 +7,36 @@ package com.google.android.gms.framework.tracing.wrapper;
 
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
 
-import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.google.android.chimera.IntentService;
 
-import org.microg.gms.utils.PackageManagerWrapper;
-import org.microg.gms.droidguard.core.VersionUtil;
-
+/**
+ * Stock GMS: extends IntentService, has private bvho a (tracer), methods are final.
+ * getDeclaredMethods: constructor, a(Intent) [abstract], attachBaseContext [protected final], onHandleIntent [public final]
+ * getDeclaredFields: one private field (tracer)
+ * getDeclaredClasses: empty
+ * No getPackageManager override — PM spoofing is process-level via ActivityThread.sPackageManager.
+ */
 public abstract class TracingIntentService extends IntentService {
-    private static final String TAG = "TracingIntentService";
+    // Match stock field: private bvho a (tracer). We use Object since bvho is obfuscated.
+    private Object a;
 
     public TracingIntentService(String name) {
         super(name);
-    }
-
-    @Override
-    public void attachBaseContext(Context newBase) {
-        super.attachBaseContext(newBase);
+        this.a = null;
     }
 
     protected abstract void a(@Nullable Intent intent);
 
     @Override
-    public PackageManager getPackageManager() {
-        return new PackageManagerWrapper(super.getPackageManager()) {
-            @NonNull
-            @Override
-            public PackageInfo getPackageInfo(@NonNull String packageName, int flags) {
-                PackageInfo packageInfo = super.getPackageInfo(packageName, flags);
-                if ("com.google.android.gms".equals(packageName)) {
-                    VersionUtil versionUtil = new VersionUtil(TracingIntentService.this);
-                    packageInfo.versionCode = versionUtil.getVersionCode();
-                    packageInfo.versionName = versionUtil.getVersionString();
-                    packageInfo.sharedUserId = "com.google.uid.shared";
-                }
-                return packageInfo;
-            }
-        };
+    protected final void attachBaseContext(Context newBase) {
+        super.attachBaseContext(newBase);
     }
 
     @Override
-    public void onHandleIntent(@Nullable Intent intent) {
+    public final void onHandleIntent(@Nullable Intent intent) {
         this.a(intent);
     }
 }

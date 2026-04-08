@@ -187,23 +187,24 @@ message GetConsentResponse {
 }
 
 // SetConsentRequest is the request to set consent
+// Field numbers verified against GMS v26.02.33 decode_hnmt (hzcv.java) — S162
 message SetConsentRequest {
   // (Required)
   RequestHeader header = 1;
-  // One of the following would be set. (Optional) one of the consent messages should be set. See the TODO below (b/294101685)
-  DeviceConsent device_consent = 2;
+  // (Optional) Device-level consent (consent + cost_setting). GMS hzbl at field 3.
+  DeviceConsent device_consent = 3;
   // (Required) Added in v23, Required in v >= 23. Assumed CONSTELLATION for v < 23. The client for which the consent is being set
   AsterismClient asterism_client = 4;
-  // (Optional) for device_consent when asterism_client is RCS
-  RcsConsentVersion consent_version = 5;
-  // PNV Device Verification Consent.
-  DeviceVerificationConsent device_verification_consent = 6;
+  // (Optional) Audit token that points to the record of consent moment in ARI. GMS bytes at field 6.
+  bytes audit_token = 6;
   // Parameters passed by API callers
   repeated Param api_params = 7;
   // (Optional) one of the consent messages should be set Used to set consent via OnDemandConsent flow.
   OnDemandConsent on_demand_consent = 8;
-  // (Optional) Audit token that points to the record of consent moment in ARI
-  bytes audit_token = 9;
+  // (Optional) for device_consent when asterism_client is RCS. GMS int32 at field 9.
+  RcsConsentVersion consent_version = 9;
+  // PNV Device Verification Consent. GMS hzbp at field 10 (oneof). bewt.y() uses this path for RCS.
+  DeviceVerificationConsent device_verification_consent = 10;
 }
 
 // SetContentResponse is the response to set consent
@@ -546,44 +547,58 @@ message ChallengeResponse {
 }
 
 // Response to MT challenge.
+// Stock GMS (hyzp): field 1 = full SMS message body, field 2 = originating address (sender).
+// Server extracts OTP from the raw body itself.
 message MTChallengeResponse {
-  // The OTP code extracted from SMS (e.g., "123456")
-  string sms_code = 1;
-  // The full SMS text (optional)
-  string sms_text = 2;
-  // The sender phone number of this SMS
-  string sender = 3;
+  // Full SMS message body (server parses OTP from this)
+  string sms_body = 1;
+  // Originating address (sender phone number)
+  string originating_address = 2;
 }
 
 // Response to Carrier Id challenge.
 message CarrierIDChallengeResponse {
-  // ISIM Response from the Carrier ID module on the client. http://www.arib.or.jp/IMT-2000/V740Dec09/5_Appendix/Rel5/31/31103-5d1.pdf (Required)
-  // string isim_response = ?;
-  // Indicates the requested GTAF verification method for phone number verification
-  // GtafVerificationMethod gtaf_verification_method = ?;
-  // Carrier ID challenge preference passed to GTAF
-  // CarrierIDChallengePreference carrier_id_challenge_preference = ?;
+  string isim_response = 1;
+  CarrierIdError carrier_id_error = 2;
+}
+
+enum CarrierIdError {
+  CARRIER_ID_ERROR_NO_ERROR = 0;
+  CARRIER_ID_ERROR_UNKNOWN_ERROR = 1;
+  CARRIER_ID_ERROR_NO_SIM = 2;
+  CARRIER_ID_ERROR_NOT_SUPPORTED = 3;
+  CARRIER_ID_ERROR_NULL_RESPONSE = 4;
+  CARRIER_ID_ERROR_UNABLE_TO_READ_SUBSCRIPTION = 5;
+  CARRIER_ID_ERROR_REFLECTION_ERROR = 6;
+  CARRIER_ID_ERROR_RETRY_ATTEMPT_EXCEEDED = 7;
 }
 
 message MOChallengeResponse {
-  // MO challenge status.
-  // int32 status = ?;
-  // Result code of the sms send status.
-  // int32 sms_result_code = ?;
-  // Error code if the sms send fails due to a generic error.
-  // int32 sms_error_code = ?;
+  MOChallengeStatus status = 1;
+  int64 sms_result_code = 2;
+  int64 sms_error_code = 3;
+}
+
+enum MOChallengeStatus {
+  MO_STATUS_UNKNOWN = 0;
+  MO_STATUS_COMPLETED = 1;
+  MO_STATUS_FAILED_TO_SEND = 2;
+  MO_STATUS_NO_ACTIVE_SUBSCRIPTION = 3;
+  MO_STATUS_NO_SMS_MANAGER = 4;
 }
 
 // Response to Registered SMS challenge.
 message RegisteredSMSChallengeResponse {
-  // A list of all sms received from verified senders, encoded in MessageID with necessary metadata.
-  // repeated MessageID message_ids = ?;
+  repeated RegisteredSmsPayload items = 1;
+}
+
+message RegisteredSmsPayload {
+  bytes payload = 1;
 }
 
 // Response to FlashCall challenge.
 message FlashCallChallengeResponse {
-  // The phone number of the caller of the flash call Example: +15413010167
-  // string caller = ?;
+  string caller = 1;
 }
 
 // Pending verification details (different from PendingVerificationInfo at line ~286)
@@ -686,8 +701,10 @@ message ChallengeID {
 
 // MT Challenge
 message MTChallenge {
-  // If set, client will only read SMS that has this string as substring, and send only those SMS as challenge response.
-  string message_substring = 1;
+  // Server sends binary data here (NOT valid UTF-8). Must use bytes to preserve
+  // original wire content — string would corrupt via UTF-8 round-trip (U+FFFD replacement).
+  // Root cause of Proceed gRPC UNKNOWN error (S172).
+  bytes message_substring = 1;
 }
 
 // MO Challenge
@@ -698,8 +715,8 @@ message MOChallenge {
   string sms = 2;
   // Info required to send data SMS. If not provided the client will send visible/text SMS.
   DataSMSInfo data_sms_info = 3;
-  // The sleep intervals for the MO challenge set by the server.
-  repeated int32 polling_intervals = 4;
+  // Comma-separated polling intervals in millis for MO challenge re-Proceed
+  string polling_intervals = 4;
 }
 
 // Carrier ID Challenge used for SS7 traffic.
@@ -1279,88 +1296,57 @@ message StatusProto {
 }
 
 // The telephony information of the client which is used to choose a right challenge for this client based on policies. Next ID: 27
-// FULLY VERIFIED from hwbt.java hnmt + bfdv.java (Session 66 - 2026-01-29)
+// VERIFIED: v25 hwbt.java/bfdv.java (S66), v26 hzdz.java/bfqi.java (S210)
 message TelephonyInfo {
-  // Field 1 (Java d): sim_operator enum (bfdv.java:191 - i3-2 from bfdxVar.b())
-  int32 sim_operator = 1;
+  // getPhoneType() - 2: GSM→1, CDMA→2, SIP→3
+  int32 phone_type = 1;
 
-  // Field 2 (Java e): network_operator string (bfdv.java:196 - strI from bfdxVar.i())
-  string network_operator = 2;
+  // getGroupIdLevel1()
+  string group_id_level1 = 2;
 
-  // Field 3 (Java f): sim_country message (bfdv.java:220 - hwbpVar2)
   MobileOperatorCountry sim_country = 3;
-
-  // Field 4 (Java g): network_country message (bfdv.java:244 - hwbpVar3)
   MobileOperatorCountry network_country = 4;
 
-  // Field 5 (Java h): data_roaming enum (bfdv.java:252 - hwbr.a(i4))
+  // TelephonyManager.isNetworkRoaming(): not→1, roaming→2
   int32 data_roaming = 5;
 
-  // Field 6 (Java i): roaming enum (bfdv.java:280 - hwbr.a(i6))
-  // NOTE: Was incorrectly named sms_capability before!
-  int32 roaming = 6;
+  // ConnectivityManager.activeNetworkInfo.isRoaming(): null→0, not→1, roaming→2
+  int32 network_roaming = 6;
 
-  // Field 7 (Java j): sms_capability enum (bfdv.java:272 - i2-2, SMS restriction value)
-  // Was reserved - now properly defined
+  // SMS perms + isSmsCapable + DISALLOW_SMS: no_perms→1, restricted→4, not_capable→1, capable→2
   int32 sms_capability = 7;
 
-  // Field 8 (Java m): subscription_count INT32 (bfdv.java:285 - iF from bfdxVar.f())
-  // NOTE: Was incorrectly ServiceState enum before!
   int32 subscription_count = 8;
-
-  // Field 9 (Java n): subscription_count_max INT32 (bfdv.java:290 - iA3 from bfdxVar.a())
-  // NOTE: Was incorrectly VoiceCapability enum before!
   int32 subscription_count_max = 9;
 
-  // Field 10: not used
-
-  // Field 11 (Java k): eap_aka_capability enum (bfdv.java:295 - i7-2 from bfdxVar.u())
-  // NOTE: Was incorrectly named network_type before!
+  // getIccAuthentication method exists: yes→2, no→1
   int32 eap_aka_capability = 11;
 
-  // Field 12 (Java l): sms_no_confirm_capability enum (bfdv.java:300 - i8-2, permission check)
-  // NOTE: Was incorrectly named sim_state before!
+  // SEND_SMS_NO_CONFIRMATION permission: granted→2, not→1
   int32 sms_no_confirm_capability = 12;
 
-  // Field 13 (Java c): service_state enum (bfdv.java:259 - i5-2 from bfdxVar.e())
-  // NOTE: Was incorrectly named phone_type before!
-  int32 service_state = 13;
+  // getSimState(): READY→2, else→1
+  int32 sim_state = 13;
 
-  // Field 14: not used
-
-  // Field 15 (Java p): imei string (bfdv.java:307 - strJ from bfdxVar.j(), conditional)
-  // NOTE: Was incorrectly named iccid before!
-  // Made optional so Wire accepts null to omit field when empty
+  // getImei() / getMeid(), conditional on Phenotype flag
   optional string imei = 15;
 
-  // Field 16 (Java q): phone_type enum (bfdv.java:314 - hwbsVarH.a())
-  // NOTE: Was incorrectly named active_subscription_info before!
-  int32 phone_type = 16;
+  // ServiceState: IN_SERVICE→1, OUT_OF_SERVICE→2, EMERGENCY_ONLY→3, POWER_OFF→4
+  int32 service_state = 16;
 
-  // Fields 17-20: repeated messages - CONDITIONAL, controlled by Phenotype flags
-  // PROOF (beiz.java:931-962):
-  //   field 17 (s): if (hzcc.i()) { hwbtVar2.s = ... }  // hzcc.i() = Phenotype flag y()
-  //   field 20 (v): if (hzcc.j()) { hwbtVar4.v = ... }  // hzcc.j() = Phenotype flag z()
-  //   fields 18,19: if (mapC.containsKey(num)) { hwbtVar6.u/t = ... }  // conditional on map
-  // microG: We don't set these (empty repeated = not sent on wire). This is correct
-  // because we don't have the Phenotype flags enabled.
-  repeated TelephonyCapabilityInfo capability_infos = 17;      // hvye - conditional on hzcc.i()
-  repeated TelephonyStateInfo state_infos = 18;                // hvyc - conditional on mapC
-  repeated TelephonyPermissionInfo permission_infos = 19;      // hvyh - conditional on mapC
-  repeated TelephonyDetailedInfo detailed_infos = 20;          // hvyi - conditional on hzcc.j()
+  // Conditional on Phenotype flags — microG omits (correct)
+  repeated TelephonyCapabilityInfo capability_infos = 17;
+  repeated TelephonyStateInfo state_infos = 18;
+  repeated TelephonyPermissionInfo permission_infos = 19;
+  repeated TelephonyDetailedInfo detailed_infos = 20;
 
-  // Field 21 (Java o): is_embedded bool (bfdv.java:322 - subscriptionInfo.isEmbedded())
   bool is_embedded = 21;
 
-  // Field 22: not used
-
-  // Field 23 (Java r): unknown enum (bfdv.java:335 - always set to 1)
+  // Conditional: set to 1 when EAP-AKA capable + Phenotype flag
   int32 unknown_field_23 = 23;
 
-  // Field 24: not used
-
-  // Field 25 (Java w): timestamp int64 (bfdv.java:329 - jC from bfdxVar.c())
-  int64 timestamp = 25;
+  // getSimCarrierId() as long
+  int64 sim_carrier_id = 25;
 }
 
 // TelephonyInfo field 17 (hvye) - Capability info with nested entries

@@ -11,6 +11,7 @@ import com.google.android.gms.droidguard.internal.DroidGuardResultsRequest
 import com.google.android.gms.droidguard.internal.IDroidGuardCallbacks
 import com.google.android.gms.droidguard.internal.IDroidGuardHandle
 import com.google.android.gms.droidguard.internal.IDroidGuardService
+import org.microg.gms.droidguard.GuardCallback
 
 class DroidGuardServiceImpl(private val service: DroidGuardChimeraService, private val packageName: String) : IDroidGuardService.Stub() {
     override fun guard(callbacks: IDroidGuardCallbacks?, flow: String?, map: MutableMap<Any?, Any?>?) {
@@ -26,7 +27,7 @@ class DroidGuardServiceImpl(private val service: DroidGuardChimeraService, priva
     override fun getHandle(): IDroidGuardHandle {
         Log.d(TAG, "getHandle()")
         return when (DroidGuardPreferences.getMode(service)) {
-            DroidGuardPreferences.Mode.Embedded -> DroidGuardHandleImpl(service, packageName, service.b, service.b(packageName))
+            DroidGuardPreferences.Mode.Embedded -> DroidGuardHandleImpl(service, packageName, service.b, GuardCallback(service, packageName))
             DroidGuardPreferences.Mode.Network -> RemoteHandleImpl(service, packageName)
         }
     }
