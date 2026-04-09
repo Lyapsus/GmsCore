@@ -145,11 +145,20 @@ abstract class ServiceProxy(private val loader: ServiceLoader) : android.app.Ser
     }
 
     override fun superStartForeground(id: Int, notification: Notification, foregroundServiceType: Int) {
-        super.startForeground(id, notification, foregroundServiceType)
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            super.startForeground(id, notification, foregroundServiceType)
+        } else {
+            super.startForeground(id, notification)
+        }
     }
 
     override fun superStopForeground(flags: Int) {
-        super.stopForeground(flags)
+        if (android.os.Build.VERSION.SDK_INT >= 24) {
+            super.stopForeground(flags)
+        } else {
+            @Suppress("DEPRECATION")
+            super.stopForeground(flags != 0)
+        }
     }
 
     override fun superStopForeground(removeNotification: Boolean) {
