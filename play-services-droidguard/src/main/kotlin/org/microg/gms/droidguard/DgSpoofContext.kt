@@ -303,12 +303,9 @@ class DgSpoofContext(base: Context) : ContextWrapper(base) {
                 spoofAppInfo(context.applicationInfo)
             } catch (_: Exception) {}
 
-            // Patch PackageManager to intercept getPackageInfo results
-            patchPackageManager(context)
-
-            // Patch process-global ActivityThread.sPackageManager - catches ALL PM calls
-            // regardless of which Context or PackageManager instance is used
-            patchActivityThreadPm(context.packageName)
+            // S227: PM proxy (patchPackageManager + patchActivityThreadPm) proven unnecessary.
+            // Tachyon E2EE works without intercepting getPackageInfo/getInstallerPackageName.
+            // Removed: permissions injection, installer spoof, FLAG_DEBUGGABLE masking via PM.
 
             // Ensure snet_shared_uuid exists
             try {
