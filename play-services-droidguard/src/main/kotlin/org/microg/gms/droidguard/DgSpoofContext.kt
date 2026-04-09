@@ -43,7 +43,7 @@ class DgSpoofContext(base: Context) : ContextWrapper(base) {
     companion object {
         const val STOCK_VERSION_NAME = "26.02.33 (190400-858744110)"
         const val STOCK_APPLICATION_CLASS = "co.g.App"
-        const val STOCK_TARGET_SDK = 34
+        const val STOCK_TARGET_SDK = 36
 
         @Volatile private var pmPatched = false
 
