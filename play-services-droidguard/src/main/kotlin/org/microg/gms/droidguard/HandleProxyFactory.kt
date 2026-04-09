@@ -155,9 +155,12 @@ open class HandleProxyFactory(private val context: Context) {
             val parentLoader = context.classLoader
             val originalClassLoader: ClassLoader? = null // no spoofing needed — natural CL is correct
             try {
-                // Named class: getClass().getName() = "com.google.android.gms.droidguard.DgVmClassLoader"
-                // instead of "org.microg.gms.droidguard.HandleProxyFactory$loadClass$1$dgLoader$1"
-                val dgLoader = com.google.android.gms.droidguard.DgVmClassLoader(
+                // S225: Use stock DexClassLoader directly. DG captures getClass().getName()
+                // on each classloader in chain — goes into encrypted telemetry (field 2).
+                // Stock chain: DexClassLoader → PathClassLoader → BootClassLoader
+                // S214's DgVmClassLoader showed "com.google.android.gms.droidguard.DgVmClassLoader"
+                // — a non-stock name that directly fingerprints microG inside the token.
+                val dgLoader = dalvik.system.DexClassLoader(
                     getTheApkFile(vmKey).absolutePath, getOptDir(vmKey).absolutePath, null, parentLoader
                 )
                 // Log classloader chain as DG will see it via getClass().getName()
