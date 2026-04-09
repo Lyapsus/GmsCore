@@ -40,9 +40,7 @@ internal suspend fun Context.cryptAuthSyncKeys(authToken: String, instanceId: St
             ApplicationSpecificMetadata(
                 gcm_registration_id = instanceToken.toByteArray().toByteString(),
                 notification_enabled = true,
-                device_software_version = "%09d".format(BuildConfig.VERSION_CODE).let {
-                    "${it.substring(0, 2)}.${it.substring(2, 4)}.${it.substring(4, 6)} (190800-{{cl}})"
-                },
+                device_software_version = "26.02.33 (190400-858744110)",
                 device_software_version_code = BuildConfig.VERSION_CODE.toLong(),
                 device_software_package = Constants.GMS_PACKAGE_NAME
             )
