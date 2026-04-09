@@ -114,7 +114,7 @@ class GoogleConstellationClient(private val context: Context) {
         // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
         private const val API_KEY = "AIzaSyAP-gfH3qvi6vgHZbSYwQ_XHqV_mXHhzIk"
         private const val GMSCORE_VERSION_NUMBER = 260233
-        private const val GMSCORE_VERSION = "26.02.33 (190400-{{cl}})"
+        private const val GMSCORE_VERSION = "26.02.33 (190400-858744110)"
         private const val GAIA_TOKEN_SCOPE = "oauth2:https://www.googleapis.com/auth/numberer"
 
         // Debug-only DG flow experiment knobs (default behavior unchanged when unset)
@@ -248,7 +248,7 @@ class GoogleConstellationClient(private val context: Context) {
                         val certSha1 = PackageUtils.firstSignatureDigest(context, packageName)
                         val versionCode = org.microg.gms.common.Constants.GMS_VERSION_CODE
                         val versionName = "%09d".format(versionCode).let {
-                            "${it.substring(0, 2)}.${it.substring(2, 4)}.${it.substring(4, 6)} (190400-{{cl}})"
+                            "${it.substring(0, 2)}.${it.substring(2, 4)}.${it.substring(4, 6)} (190400-858744110)"
                         }
                         val clientLibVersion = "iid-${(versionCode / 1000) * 1000}"
 
