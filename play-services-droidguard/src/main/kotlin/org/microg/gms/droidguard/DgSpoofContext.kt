@@ -69,6 +69,10 @@ class DgSpoofContext(base: Context) : ContextWrapper(base) {
                 f.set(info, STOCK_APPLICATION_CLASS)
             } catch (_: Exception) {}
             info.targetSdkVersion = STOCK_TARGET_SDK
+            // Mask FLAG_DEBUGGABLE (debug builds set it, stock doesn't)
+            info.flags = info.flags and ApplicationInfo.FLAG_DEBUGGABLE.inv()
+            // Ensure FLAG_SYSTEM and FLAG_UPDATED_SYSTEM_APP are set (stock GMS is system app)
+            info.flags = info.flags or ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP
         }
 
         /**
@@ -368,6 +372,17 @@ class DgSpoofContext(base: Context) : ContextWrapper(base) {
                     spoofAppInfo(result)
                     android.util.Log.i("DgSpoofContext", "PM INTERCEPT getApplicationInfo($pkg): " +
                         "className=${result.className}, targetSdk=${result.targetSdkVersion}")
+                }
+            }
+
+            // Intercept getInstallerPackageName — return Play Store for GMS
+            if (method.name == "getInstallerPackageName" || method.name == "getInstallSourceInfo") {
+                val pkg = args?.firstOrNull() as? String
+                if (pkg == gmsPackage) {
+                    if (method.name == "getInstallerPackageName") {
+                        android.util.Log.d("DgSpoofContext", "PM INTERCEPT getInstallerPackageName($pkg) → com.android.vending")
+                        return "com.android.vending"
+                    }
                 }
             }
 
