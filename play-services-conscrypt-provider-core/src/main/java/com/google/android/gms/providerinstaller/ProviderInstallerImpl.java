@@ -109,6 +109,16 @@ public class ProviderInstallerImpl {
     private static void initProvider(Context context, String packageName) {
         Log.d(TAG, "Initializing provider for " + packageName);
 
+        // Android 10+ ships Conscrypt in /apex/com.android.conscrypt/ which provides
+        // modern TLS. Skip loading microG's bundled native lib on these versions --
+        // the bundled libconscrypt_gmscore_jni.so ABORTs (SIGABRT in JNI_OnLoad) on
+        // some devices (e.g., Samsung Android 12), killing the entire process.
+        // System Conscrypt is sufficient and avoids the native crash.
+        if (SDK_INT >= 29) {
+            Log.d(TAG, "Android " + SDK_INT + " has system Conscrypt, skipping microG provider");
+            return;
+        }
+
         try {
             provider = Conscrypt.newProviderBuilder().setName(PROVIDER_NAME).defaultTlsProtocol("TLSv1.2").build();
         } catch (UnsatisfiedLinkError e) {
