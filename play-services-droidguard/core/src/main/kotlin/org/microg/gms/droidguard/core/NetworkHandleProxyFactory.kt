@@ -147,7 +147,7 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
                         KeyValuePair("VERSION.SDK_INT", Build.VERSION.SDK_INT.toString()),
                 ),
                 versionName = version.versionString,
-                versionCode = BuildConfig.VERSION_CODE,
+                versionCode = version.versionCode,
                 hasAccount = hasGoogleAccount,
                 isGoogleCn = false,
                 enableInlineVm = true,
