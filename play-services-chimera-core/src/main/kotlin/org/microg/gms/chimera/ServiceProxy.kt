@@ -4,8 +4,6 @@
  */
 package org.microg.gms.chimera
 
-import android.app.Application
-import android.app.Notification
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -23,7 +21,7 @@ abstract class ServiceProxy(private val loader: ServiceLoader) : android.app.Ser
         if (actualService == null) {
             val service = loader.loadService(base)
             actualService = service
-            service.setProxyCallbacks(this, this)
+            service.setProxy(this, this)
         }
     }
 
@@ -110,24 +108,6 @@ abstract class ServiceProxy(private val loader: ServiceLoader) : android.app.Ser
         }
     }
 
-    // --- ProxyCallbacks implementation ---
-
-    override fun getContainerService(): android.app.Service {
-        return this
-    }
-
-    override fun getContainerServiceClassName(): String {
-        return this.javaClass.name
-    }
-
-    override fun superGetApplication(): Application {
-        return super.getApplication()
-    }
-
-    override fun superGetForegroundServiceType(): Int {
-        return 0 // Default - no foreground service type
-    }
-
     override fun superOnCreate() {
         super.onCreate()
     }
@@ -138,32 +118,6 @@ abstract class ServiceProxy(private val loader: ServiceLoader) : android.app.Ser
 
     override fun superOnStartCommand(intent: Intent, flags: Int, startId: Int): Int {
         return super.onStartCommand(intent, flags, startId)
-    }
-
-    override fun superStartForeground(id: Int, notification: Notification) {
-        super.startForeground(id, notification)
-    }
-
-    override fun superStartForeground(id: Int, notification: Notification, foregroundServiceType: Int) {
-        if (android.os.Build.VERSION.SDK_INT >= 29) {
-            super.startForeground(id, notification, foregroundServiceType)
-        } else {
-            super.startForeground(id, notification)
-        }
-    }
-
-    override fun superStopForeground(flags: Int) {
-        if (android.os.Build.VERSION.SDK_INT >= 24) {
-            super.stopForeground(flags)
-        } else {
-            @Suppress("DEPRECATION")
-            super.stopForeground(flags != 0)
-        }
-    }
-
-    override fun superStopForeground(removeNotification: Boolean) {
-        @Suppress("DEPRECATION")
-        super.stopForeground(removeNotification)
     }
 
     override fun superStopSelf() {
