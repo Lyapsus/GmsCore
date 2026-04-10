@@ -11,5 +11,3 @@ local.properties
 .settings
 .classpath
 .project
-golden-snapshots/
-androguard.log

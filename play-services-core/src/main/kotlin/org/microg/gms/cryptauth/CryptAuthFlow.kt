@@ -115,7 +115,7 @@ private suspend fun Context.registerForCryptAuth(checkinInfo: LastCheckinInfo, i
         .extraParam("gmsv", BuildConfig.VERSION_CODE.toString())
         .extraParam("appid", instanceId)
         .extraParam("scope", GCM_REGISTER_SCOPE)
-        .extraParam("app_ver_name", "%09d".format(BuildConfig.VERSION_CODE).let {
+        .extraParam("app_ver_name","%09d".format(BuildConfig.VERSION_CODE).let {
             "${it.substring(0, 2)}.${it.substring(2, 4)}.${it.substring(4, 6)} (190800-{{cl}})"
         })
         .info(GCM_REGISTER_INFO)
