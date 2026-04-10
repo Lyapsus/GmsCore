@@ -62,3 +62,10 @@ jobs:
         run: "./gradlew assemble${{ matrix.target }}"
       - name: "Execute Gradle lint"
         run: "./gradlew lint${{ matrix.target }}"
+      - name: "Upload GmsCore APK"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GmsCore-${{ matrix.target }}
+          path: play-services-core/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
