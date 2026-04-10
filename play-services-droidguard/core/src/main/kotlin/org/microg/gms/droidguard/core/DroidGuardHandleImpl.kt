@@ -147,11 +147,6 @@ class DroidGuardHandleImpl(private val context: Context, private val packageName
         Log.d(TAG, "close()")
         condition.block()
         try {
-            callback.logSessionSummary("close/flow=$flow")
-        } catch (e: Exception) {
-            Log.w(TAG, "Error logging session summary", e)
-        }
-        try {
             handleProxy?.close()
         } catch (e: Exception) {
             Log.w(TAG, "Error during handle close", e)
