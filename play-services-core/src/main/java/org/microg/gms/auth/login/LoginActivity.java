@@ -60,19 +60,13 @@ import org.microg.gms.checkin.LastCheckinInfo;
 import org.microg.gms.common.Constants;
 import org.microg.gms.common.HttpFormClient;
 import org.microg.gms.common.Utils;
-import org.microg.gms.droidguard.DroidGuardClientImpl;
 import org.microg.gms.people.PeopleManager;
 import org.microg.gms.profile.Build;
 import org.microg.gms.profile.ProfileManager;
 
-import com.google.android.gms.tasks.Tasks;
-
 import java.io.IOException;
 import java.security.MessageDigest;
-import java.util.HashMap;
 import java.util.Locale;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 import static android.accounts.AccountManager.PACKAGE_NAME_KEY_LEGACY_NOT_VISIBLE;
 import static android.accounts.AccountManager.VISIBILITY_USER_MANAGED_VISIBLE;
@@ -352,38 +346,35 @@ public class LoginActivity extends AssistantActivity {
     }
 
     private void retrieveRtToken(String oAuthToken) {
-        // Get DroidGuard token async first, then continue with auth request
-        getDroidGuardForAuthAsync(null, droidGuardToken -> {
-            new AuthRequest().fromContext(this)
-                    .appIsGms()
-                    .callerIsGms()
-                    .service("ac2dm")
-                    .token(oAuthToken).isAccessToken()
-                    .addAccount()
-                    .getAccountId()
-                    .droidguardResults(droidGuardToken)
-                    .getResponseAsync(new HttpFormClient.Callback<AuthResponse>() {
-                        @Override
-                        public void onResponse(AuthResponse response) {
-                            Account account = new Account(response.email, accountType);
-                            if (isReAuth && reAuthAccount != null && reAuthAccount.name.equals(account.name)) {
-                                accountManager.removeAccount(account, future -> saveAccount(account, response), null);
-                            } else {
-                                saveAccount(account, response);
-                            }
+        new AuthRequest().fromContext(this)
+                .appIsGms()
+                .callerIsGms()
+                .service("ac2dm")
+                .token(oAuthToken).isAccessToken()
+                .addAccount()
+                .getAccountId()
+                .droidguardResults("null" /*TODO*/)
+                .getResponseAsync(new HttpFormClient.Callback<AuthResponse>() {
+                    @Override
+                    public void onResponse(AuthResponse response) {
+                        Account account = new Account(response.email, accountType);
+                        if (isReAuth && reAuthAccount != null && reAuthAccount.name.equals(account.name)) {
+                            accountManager.removeAccount(account, future -> saveAccount(account, response), null);
+                        } else {
+                            saveAccount(account, response);
                         }
+                    }
 
-                        @Override
-                        public void onException(Exception exception) {
-                            Log.w(TAG, "onException", exception);
-                            runOnUiThread(() -> {
-                                showError(R.string.auth_general_error_desc);
-                                setNextButtonText(android.R.string.ok);
-                            });
-                            state = -2;
-                        }
-                    });
-        });
+                    @Override
+                    public void onException(Exception exception) {
+                        Log.w(TAG, "onException", exception);
+                        runOnUiThread(() -> {
+                            showError(R.string.auth_general_error_desc);
+                            setNextButtonText(android.R.string.ok);
+                        });
+                        state = -2;
+                    }
+                });
     }
 
     private void saveAccount(Account account, AuthResponse response) {
@@ -429,19 +420,17 @@ public class LoginActivity extends AssistantActivity {
     private void retrieveGmsToken(final Account account) {
         final AuthManager authManager = new AuthManager(this, account.name, GMS_PACKAGE_NAME, "ac2dm");
         authManager.setPermitted(true);
-        // Get DroidGuard token async first, then continue with auth request
-        getDroidGuardForAuthAsync(account.name, droidGuardToken -> {
-            new AuthRequest().fromContext(this)
-                    .appIsGms()
-                    .callerIsGms()
-                    .service(authManager.getService())
-                    .email(account.name)
-                    .token(AccountManager.get(this).getPassword(account))
-                    .systemPartition(true)
-                    .hasPermission(true)
-                    .addAccount()
-                    .getAccountId()
-                    .droidguardResults(droidGuardToken)
+        new AuthRequest().fromContext(this)
+                .appIsGms()
+                .callerIsGms()
+                .service(authManager.getService())
+                .email(account.name)
+                .token(AccountManager.get(this).getPassword(account))
+                .systemPartition(true)
+                .hasPermission(true)
+                .addAccount()
+                .getAccountId()
+                .droidguardResults("null")
                 .getResponseAsync(new HttpFormClient.Callback<AuthResponse>() {
                     @Override
                     public void onResponse(AuthResponse response) {
@@ -468,7 +457,6 @@ public class LoginActivity extends AssistantActivity {
                         state = -2;
                     }
                 });
-        });
     }
 
     private void notifyGcmGroupUpdate(String accountName) {
@@ -486,50 +474,6 @@ public class LoginActivity extends AssistantActivity {
             Log.w(TAG, "Checkin failed", e);
         }
         return false;
-    }
-
-    /**
-     * Callback interface for async DroidGuard token retrieval.
-     */
-    private interface DroidGuardCallback {
-        void onResult(String token);
-    }
-
-    /**
-     * Get DroidGuard token for auth requests ASYNCHRONOUSLY.
-     * GMS uses flow "addAccount" with bindings: dg_email, dg_androidId, dg_gmsCoreVersion, dg_package
-     * See: aeho.java:21-55, aeoe.java:543-548 in GMS decompilation
-     */
-    private void getDroidGuardForAuthAsync(String email, DroidGuardCallback callback) {
-        new Thread(() -> {
-            String token = null;
-            try {
-                DroidGuardClientImpl droidGuard = new DroidGuardClientImpl(this);
-
-                // Build bindings matching GMS aeho.java:45-54
-                Map<String, String> bindings = new HashMap<>();
-                if (email != null) {
-                    bindings.put("dg_email", email);
-                }
-                // Get Android ID like GMS does (skip if checkin hasn't happened yet)
-                long androidIdLong = LastCheckinInfo.read(this).getAndroidId();
-                if (androidIdLong > 0) {
-                    bindings.put("dg_androidId", Long.toHexString(androidIdLong));
-                }
-                bindings.put("dg_gmsCoreVersion", String.valueOf(Constants.GMS_VERSION_CODE));
-                bindings.put("dg_package", getPackageName());
-
-                // Flow name from GMS: "addAccount"
-                token = Tasks.await(droidGuard.getResults("addAccount", bindings, null), 30, TimeUnit.SECONDS);
-                if (token != null) {
-                    Log.d(TAG, "Got DroidGuard token for auth (" + token.length() + " chars)");
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "Failed to get DroidGuard for auth", e);
-            }
-            final String finalToken = token != null ? token : "null";
-            runOnUiThread(() -> callback.onResult(finalToken));
-        }).start();
     }
 
     @Override

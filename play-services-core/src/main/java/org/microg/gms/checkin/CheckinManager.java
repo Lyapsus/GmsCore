@@ -29,14 +29,11 @@ import org.microg.gms.common.Utils;
 import org.microg.gms.gservices.GServices;
 import org.microg.gms.settings.SettingsContract;
 
-import android.util.Log;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
 public class CheckinManager {
-    private static final String TAG = "CheckinManager";
     private static final long MIN_CHECKIN_INTERVAL = 3 * 60 * 60 * 1000; // 3 hours
 
     @SuppressWarnings("MissingPermission")
@@ -50,17 +47,13 @@ public class CheckinManager {
         AccountManager accountManager = AccountManager.get(context);
         String accountType = AuthConstants.DEFAULT_ACCOUNT_TYPE;
         for (Account account : accountManager.getAccountsByType(accountType)) {
-            try {
-                String token = new AuthRequest()
-                        .email(account.name).token(accountManager.getPassword(account))
-                        .hasPermission(true).service("ac2dm")
-                        .app("com.google.android.gsf", Constants.GMS_PACKAGE_SIGNATURE_SHA1)
-                        .getResponse().LSid;
-                if (token != null) {
-                    accounts.add(new CheckinClient.Account(account.name, token));
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "ac2dm auth failed for " + account.name + ", proceeding without account cookie", e);
+            String token = new AuthRequest()
+                    .email(account.name).token(accountManager.getPassword(account))
+                    .hasPermission(true).service("ac2dm")
+                    .app("com.google.android.gsf", Constants.GMS_PACKAGE_SIGNATURE_SHA1)
+                    .getResponse().LSid;
+            if (token != null) {
+                accounts.add(new CheckinClient.Account(account.name, token));
             }
         }
         CheckinRequest request = CheckinClient.makeRequest(context,
