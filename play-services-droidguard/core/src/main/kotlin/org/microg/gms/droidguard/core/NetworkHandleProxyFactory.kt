@@ -80,6 +80,7 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
         return hit
     }
 
+    @android.annotation.SuppressLint("MissingPermission") // GMS process has GET_ACCOUNTS
     fun createRequest(flow: String?, packageName: String, pingData: PingData? = null, extra: ByteArray? = null): Request {
         ProfileManager.ensureInitialized(context)
 
