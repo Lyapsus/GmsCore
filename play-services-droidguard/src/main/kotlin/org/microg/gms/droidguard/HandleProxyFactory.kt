@@ -11,7 +11,6 @@ import android.os.ParcelFileDescriptor
 import android.os.Parcelable
 import androidx.annotation.GuardedBy
 import dalvik.system.DexClassLoader
-import dalvik.system.PathClassLoader
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
@@ -102,49 +101,13 @@ open class HandleProxyFactory(private val context: Context) {
                 getCacheDir(vmKey).deleteRecursively()
                 throw ClassNotFoundException("APK signature verification failed for vmKey=$vmKey")
             }
-            // Debug wait: pause before DG init so Frida can attach to .unstable.
-            // Opt-in via file (no Settings query = no timing anomaly in normal operation).
-            // Enable:  adb shell "su -c 'echo 20 > /data/data/com.google.android.gms/files/dg_debug_wait'"
-            // Disable: adb shell "su -c 'rm /data/data/com.google.android.gms/files/dg_debug_wait'"
-            val debugWaitFile = java.io.File(context.filesDir, "dg_debug_wait")
-            if (debugWaitFile.exists()) {
-                val secs = debugWaitFile.readText().trim().toIntOrNull() ?: 15
-                android.util.Log.w("HandleProxyFactory", "DEBUG WAIT: sleeping ${secs}s for Frida attach (PID=${android.os.Process.myPid()})")
-                Thread.sleep(secs * 1000L)
-                android.util.Log.w("HandleProxyFactory", "DEBUG WAIT: resuming")
-            }
-
-            // Pre-spoof process-level signals: ApplicationInfo, snet_shared_uuid, pif.prop
             DgSpoofContext.prespoofProcessInfo(context)
 
-            // S220: Stock .unstable loads ZERO native .so from GmsCore/lib/ dir.
-            // Verified from /tmp/stock_maps_current_s220.txt: stock has 306 .so (all system/framework),
-            // microG had 338 = same 306 + 32 extra from loadStockNativeLibs(). Stock loads native
-            // code from WITHIN the APK (r-xp on base.apk at offset 0x8740000), not as separate files.
-            // The 32 extra .so were a massive detection signal in dl_iterate_phdr (7 calls/session).
-            // loadStockNativeLibs() REMOVED. libgcore_jni.so + link_map unlink REMOVED (not needed).
-
-            // NOTE: mmapStockApk removed. The hybrid APK at /system/priv-app/GmsCore/
-            // is already 379MB (includes stock DEX 6-17). Stock GMS on this Samsung does
-            // NOT show a separate APK file mmap in maps (only dalvik-cache OAT/VDEX).
-            // The gmscore_cached.apk was creating a non-stock artifact that SUSFS had to hide.
-
-            // S217: Maps snapshot REMOVED. Writing to constellation_logs/ creates a non-stock
-            // directory that DG can detect via faccessat. For debugging, manually capture maps:
-            // adb shell "su -c 'cat /proc/$(pidof com.google.android.gms.unstable)/maps'" > /tmp/maps.txt
-
-            // Use the app's natural PathClassLoader as DG VM parent.
-            // S217: StockFirstClassLoader REMOVED from chain. DG captures getClass().getName()
-            // for each classloader — our custom class "StockFirstClassLoader" was a detection
-            // signal. Stock GMS shows plain "dalvik.system.PathClassLoader". FindClass probes
-            // only target DG's own runtime classes (S216 proven), so stock-first ordering
-            // provides zero benefit while adding a non-stock class name to the chain.
-            // Chain now: DgVmClassLoader → PathClassLoader(APK) → BootClassLoader = stock.
-            val parentLoader = context.classLoader
-            // S225 PROVEN: DexClassLoader vs DgVmClassLoader is THE tachyon gate.
-            // DG captures classloader class name in encrypted telemetry.
-            val dgLoader = dalvik.system.DexClassLoader(
-                getTheApkFile(vmKey).absolutePath, getOptDir(vmKey).absolutePath, null, parentLoader
+            // DG captures getClass().getName() on each classloader in the chain.
+            // A custom classloader class name is a detection signal. Plain DexClassLoader
+            // matches stock GMS's chain: DexClassLoader -> PathClassLoader -> BootClassLoader.
+            val dgLoader = DexClassLoader(
+                getTheApkFile(vmKey).absolutePath, getOptDir(vmKey).absolutePath, null, context.classLoader
             )
             val clazz = dgLoader.loadClass(CLASS_NAME)
             classMap[vmKey] = clazz

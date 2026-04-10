@@ -109,24 +109,6 @@ object DroidGuardPreferences {
     }
 
     /**
-     * Import a token from external source (e.g., stock GMS backup).
-     * Used for injecting cached tokens from stock GMS.
-     */
-    @JvmStatic
-    fun importCachedToken(context: Context, flow: String, tokenBase64: String, ttlTimestampMs: Long) {
-        try {
-            val prefs = context.getSharedPreferences(TOKEN_CACHE_PREFS, Context.MODE_PRIVATE)
-            prefs.edit()
-                .putString(TOKEN_PREFIX + flow, tokenBase64)
-                .putLong(TTL_PREFIX + flow, ttlTimestampMs)
-                .apply()
-            Log.i(TAG, "Imported token for flow '$flow' (expires at $ttlTimestampMs)")
-        } catch (e: Exception) {
-            Log.w(TAG, "Error importing token for flow '$flow'", e)
-        }
-    }
-
-    /**
      * Clear cached token for a specific flow.
      */
     @JvmStatic
