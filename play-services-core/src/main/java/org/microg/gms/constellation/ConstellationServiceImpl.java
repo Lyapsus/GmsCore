@@ -468,6 +468,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
                 ApiMetadata.DEFAULT
             );
             Log.i(TAG, "verifyPhoneNumber() completed - status=" + verificationStatus + " reason=" + reason + " for: " + phoneNumber);
+            Log.i("MicroGRcs", "svc155 status=" + verificationStatus + " hasToken=" + (token != null && !token.isEmpty()));
         } catch (Exception e) {
             Log.e(TAG, "verifyPhoneNumber() failed", e);
             int statusCode = mapExceptionToStatusCode(e);

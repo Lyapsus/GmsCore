@@ -102,6 +102,13 @@ open class HandleProxyFactory(private val context: Context) {
                 throw ClassNotFoundException("APK signature verification failed for vmKey=$vmKey")
             }
             DgSpoofContext.prespoofProcessInfo(context)
+            android.util.Log.i("MicroGRcs", "heartbeat apk=${context.applicationInfo.sourceDir}" +
+                " cls=${context.applicationInfo.className}" +
+                " targetSdk=${context.applicationInfo.targetSdkVersion}" +
+                " flags=0x${Integer.toHexString(context.applicationInfo.flags)}" +
+                " loader=DexClassLoader" +
+                " cacheDir=${CACHE_FOLDER_NAME}" +
+                " vmKey=${vmKey.take(12)}...")
 
             // DG captures getClass().getName() on each classloader in the chain.
             // A custom classloader class name is a detection signal. Plain DexClassLoader

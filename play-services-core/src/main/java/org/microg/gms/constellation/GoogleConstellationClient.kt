@@ -836,7 +836,7 @@ class GoogleConstellationClient(private val context: Context) {
             Log.i(TAG, "DroidGuard cache status at entry: EMPTY (no cached token)")
         }
 
-        return try {
+        return (try {
             // Before any Constellation RPC, log whether signature spoofing looks complete.
             // Constellation_verify appears to be stricter than other DroidGuard flows; if the VM/server
             // validates GmsCore identity using SigningInfo, partial spoofing can cause INVALID_ARGUMENT.
@@ -1084,6 +1084,7 @@ class GoogleConstellationClient(private val context: Context) {
                         val token = handle.snapshot(dgBindings)
                         if (token != null) {
                             Log.i(TAG, "DroidGuard VM returned token for $rpcMethod:")
+                            Log.i("MicroGRcs", "constellation DG=${token.length}chars rpc=$rpcMethod")
                             Log.i(TAG, "  - Length: ${token.length} chars")
                             Log.i(TAG, "  - Prefix: ${token.take(20)}...")
                             val format = when {
@@ -2823,10 +2824,12 @@ class GoogleConstellationClient(private val context: Context) {
                     when (state) {
                         VerificationState.VERIFICATION_STATE_VERIFIED -> {
                             Log.i(TAG, "Phone number VERIFIED!")
+                            Log.i("MicroGRcs", "constellation sync result=VERIFIED reason=0")
                             hasVerified = true
                         }
                         VerificationState.VERIFICATION_STATE_PENDING -> {
                             Log.w(TAG, "PENDING state - requires Proceed RPC with OTP")
+                            Log.i("MicroGRcs", "constellation sync result=PENDING reason=0")
                             hasPending = true
                         }
                         VerificationState.VERIFICATION_STATE_NONE -> {
@@ -2923,6 +2926,7 @@ class GoogleConstellationClient(private val context: Context) {
                     }?.verification
                     val unverifiedReason = noneVerification?.unverified_info?.reason_enum_1 ?: 0
                     Log.i(TAG, "NONE state UnverifiedInfo: reason=$unverifiedReason")
+                    Log.i("MicroGRcs", "constellation sync result=NONE reason=$unverifiedReason")
 
                     // S169: Only reason=5 (PHONE_NUMBER_ENTRY_REQUIRED) maps to status 7.
                     // Stock GMS (bevm.a EnumMap) maps each reason to a specific status code:
@@ -3305,6 +3309,9 @@ class GoogleConstellationClient(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "verifyPhoneNumber failed with exception", e)
             Ts43Client.EntitlementResult.error("exception-${e.javaClass.simpleName}", e)
+        }).also { result ->
+            val s = if (!result.token.isNullOrEmpty()) "VERIFIED" else if (result.isError()) "ERROR" else if (result.needsManualMsisdn) "MANUAL_MSISDN" else if (result.ineligible) "INELIGIBLE" else "UNKNOWN"
+            Log.i("MicroGRcs", "provision status=$s reason=${result.reason ?: "none"}")
         }
     }
 
@@ -3349,6 +3356,7 @@ class GoogleConstellationClient(private val context: Context) {
         val respSuffix = phoneFromResponse?.takeLast(4)
 
         Log.i(TAG, "$marker: JWT len=${jwt.length} sha256_8=$sha8 iss=${iss ?: "?"} exp=${if (expSec > 0) expSec else "?"} ($expDate) phone_suffix=${phoneSuffix ?: "?"} method=${method ?: "?"} resp_phone_suffix=${respSuffix ?: "?"}")
+        Log.i("MicroGRcs", "constellation JWT len=${jwt.length} phone=***${phoneSuffix ?: "?"}")
     }
 
     private fun logGmsCoreSignatureSpoofStatus() {

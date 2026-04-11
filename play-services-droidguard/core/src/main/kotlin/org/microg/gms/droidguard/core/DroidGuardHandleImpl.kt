@@ -102,6 +102,7 @@ class DroidGuardHandleImpl(private val context: Context, private val packageName
         val cachedToken = DroidGuardPreferences.getCachedToken(context, cacheKey)
         if (cachedToken != null) {
             Log.i(TAG, "Using cached DroidGuard token for flow '$flow' (${cachedToken.size} bytes)")
+            if (flow == "tachyon_registration") Log.i("MicroGRcs", "tachyon DG=${cachedToken.size}B cached=true")
             return cachedToken
         }
 
@@ -112,6 +113,7 @@ class DroidGuardHandleImpl(private val context: Context, private val packageName
             // Cache the generated token with bindings-aware key
             DroidGuardPreferences.setCachedToken(context, cacheKey, token)
             Log.i(TAG, "Generated and cached new DroidGuard token for flow '$flow' (${token.size} bytes)")
+            if (flow == "tachyon_registration") Log.i("MicroGRcs", "tachyon DG=${token.size}B cached=false")
             token
         } catch (e: Exception) {
             try {
