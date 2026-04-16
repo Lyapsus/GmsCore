@@ -7,25 +7,20 @@ package org.microg.gms.constellation
 
 import android.content.Context
 import android.accounts.AccountManager
-import android.net.ConnectivityManager
-import android.net.NetworkInfo
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import org.microg.gms.checkin.LastCheckinInfo
 import org.microg.gms.gcm.RegisterRequest
 import org.microg.gms.gcm.RegisterResponse
-import android.telephony.ServiceState
 import android.telephony.TelephonyManager
-import android.telephony.SubscriptionManager
 import android.util.Log
 import org.microg.gms.common.Constants
 import java.io.File
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import okio.ByteString
-import okio.ByteString.Companion.decodeBase64
 import org.microg.gms.common.PackageUtils
-import org.microg.gms.gcm.GcmDatabase
 import org.microg.gms.auth.AuthConstants
 import org.microg.gms.auth.AuthManager
 import java.security.KeyPairGenerator
@@ -38,47 +33,27 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import google.internal.communications.phonedeviceverification.v1.ClientInfo
-import google.internal.communications.phonedeviceverification.v1.ConnectivityAvailability
-import google.internal.communications.phonedeviceverification.v1.ConnectivityInfo
-import google.internal.communications.phonedeviceverification.v1.ConnectivityState
-import google.internal.communications.phonedeviceverification.v1.ConnectivityType
 import google.internal.communications.phonedeviceverification.v1.CountryInfo
 import google.internal.communications.phonedeviceverification.v1.DeviceId
 import google.internal.communications.phonedeviceverification.v1.DeviceSignals
-import google.internal.communications.phonedeviceverification.v1.DeviceType
-import google.internal.communications.phonedeviceverification.v1.AsterismClient
-import google.internal.communications.phonedeviceverification.v1.RequestHeader
-import google.internal.communications.phonedeviceverification.v1.RequestTrigger
 import google.internal.communications.phonedeviceverification.v1.SIMAssociation
-import google.internal.communications.phonedeviceverification.v1.SIMInfo
 import google.internal.communications.phonedeviceverification.v1.StringId
-import google.internal.communications.phonedeviceverification.v1.PartialSIMInfo
-import google.internal.communications.phonedeviceverification.v1.PartialSIMData
 import google.internal.communications.phonedeviceverification.v1.IMSIRequest
 import google.internal.communications.phonedeviceverification.v1.Param
 import google.internal.communications.phonedeviceverification.v1.SyncRequest
 import google.internal.communications.phonedeviceverification.v1.SyncResponse
 import google.internal.communications.phonedeviceverification.v1.Verification
-import google.internal.communications.phonedeviceverification.v1.VerificationAssociation
 import google.internal.communications.phonedeviceverification.v1.VerificationState
 import google.internal.communications.phonedeviceverification.v1.VerificationMethodInfo
 import google.internal.communications.phonedeviceverification.v1.VerificationMethodData
-import google.internal.communications.phonedeviceverification.v1.VerificationMethod
-import google.internal.communications.phonedeviceverification.v1.TriggerType
-import google.internal.communications.phonedeviceverification.v1.ExperimentInfo
 import google.internal.communications.phonedeviceverification.v1.TelephonyInfo
 import google.internal.communications.phonedeviceverification.v1.TelephonyInfoContainer
-import google.internal.communications.phonedeviceverification.v1.TelephonyInfoEntry
-import google.internal.communications.phonedeviceverification.v1.Timestamp
 import google.internal.communications.phonedeviceverification.v1.ClientCredentials
 import google.internal.communications.phonedeviceverification.v1.PublicKeyStatus
-import google.internal.communications.phonedeviceverification.v1.MobileOperatorCountry
 import google.internal.communications.phonedeviceverification.v1.CredentialMetadata
-import google.internal.communications.phonedeviceverification.v1.SIMSlot
 import google.internal.communications.phonedeviceverification.v1.CarrierInfo
 import google.internal.communications.phonedeviceverification.v1.IdTokenRequest
 import com.google.android.gms.constellation.VerifyPhoneNumberRequest as AidlVerifyPhoneNumberRequest
-import google.internal.communications.phonedeviceverification.v1.DroidGuardTokenResponse
 import google.internal.communications.phonedeviceverification.v1.GetVerifiedPhoneNumbersRequest
 import google.internal.communications.phonedeviceverification.v1.ClientCredentialsProto
 import google.internal.communications.phonedeviceverification.v1.IdTokenRequestProto
@@ -86,12 +61,7 @@ import google.internal.communications.phonedeviceverification.v1.ProceedRequest
 import google.internal.communications.phonedeviceverification.v1.ChallengeResponse
 import google.internal.communications.phonedeviceverification.v1.MTChallengeResponse
 import google.internal.communications.phonedeviceverification.v1.ProceedResponse
-import google.internal.communications.phonedeviceverification.v1.SetConsentRequest
-import google.internal.communications.phonedeviceverification.v1.GetConsentRequest
 import google.internal.communications.phonedeviceverification.v1.ConsentValue
-import google.internal.communications.phonedeviceverification.v1.DeviceVerificationConsent
-import google.internal.communications.phonedeviceverification.v1.DeviceVerificationConsentSource
-import google.internal.communications.phonedeviceverification.v1.DeviceVerificationConsentVersion
 
 class GoogleConstellationClient(private val context: Context) {
     companion object {
@@ -146,7 +116,7 @@ class GoogleConstellationClient(private val context: Context) {
             // Stock GMS stores per-sender IID tokens in appid.xml as "|T|{senderId}|GCM"
             // and the Constellation primary sender token also in constellation_prefs.xml as "gcm_token".
 
-            // 1. Check appid.xml (covers ALL senders including read-only 745476177629)
+            // Check appid.xml (covers ALL senders including read-only 745476177629)
             val appIdPrefs = context.getSharedPreferences("com.google.android.gms.appid", Context.MODE_PRIVATE)
             val appIdToken = appIdPrefs.getString("|T|$senderId|GCM", null)
             if (!appIdToken.isNullOrEmpty()) {
@@ -155,7 +125,7 @@ class GoogleConstellationClient(private val context: Context) {
                 return Pair(appIdToken, "seeded-from-stock-gms-appid")
             }
 
-            // 2. For Constellation primary sender, also check constellation_prefs.xml gcm_token
+            // For Constellation primary sender, also check constellation_prefs.xml gcm_token
             if (senderId == CONSTELLATION_SENDER_ID) {
                 val stockPrefs = context.getSharedPreferences("constellation_prefs", Context.MODE_PRIVATE)
                 val stockGcmToken = stockPrefs.getString("gcm_token", null)
@@ -371,7 +341,7 @@ class GoogleConstellationClient(private val context: Context) {
         Log.i(TAG, "verifyPhoneNumber: phone=$requestedNumber")
 
         return (try {
-            // 1. Get package info for headers
+            // Get package info for headers
             val packageName = context.packageName
             val certSha1 = PackageUtils.firstSignatureDigest(context, packageName)
             Log.d(TAG, "Using API key auth with package=$packageName, cert=$certSha1")
@@ -379,7 +349,7 @@ class GoogleConstellationClient(private val context: Context) {
             runBlocking {
                 var rpcClient: ConstellationRpcClient? = null
                 try {
-                // 2. Get IID token - MUST be registered with Constellation project ID!
+                // Get IID token - MUST be registered with Constellation project ID!
                 // Uses shared method that handles caching, registration, and fallbacks
                 val (iidToken, iidSource) = getOrRegisterIidToken(context, packageName, CONSTELLATION_SENDER_ID)
                 Log.d(TAG, "IID token source: $iidSource, token prefix: ${iidToken.take(20)}...")
@@ -389,7 +359,7 @@ class GoogleConstellationClient(private val context: Context) {
                 val (readOnlyIidToken, readOnlyIidSource) = getOrRegisterIidToken(context, packageName, READ_ONLY_SENDER_ID)
                 Log.d(TAG, "Read-only IID token source: $readOnlyIidSource, token prefix: ${readOnlyIidToken.take(20)}...")
 
-                // 3. Calculate iidHash for DroidGuard content bindings
+                // Calculate iidHash for DroidGuard content bindings
                 // GMS bfck.java:24-30: SHA-256 hash, pad to 64 bytes, base64 NO_PADDING|NO_WRAP (NOT URL_SAFE!), truncate to 32 chars
                 // CRITICAL FIX: GMS uses flag 3 = NO_PADDING(1) | NO_WRAP(2), NOT URL_SAFE!
                 val iidHashDigest = MessageDigest.getInstance("SHA-256").digest(iidToken.toByteArray(Charsets.UTF_8))
@@ -412,7 +382,7 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // 3. Setup gRPC + DG via ConstellationRpcClient
+                // Setup gRPC + DG via ConstellationRpcClient
                 val gaiaTokens = getGaiaTokens(packageName)
                 if (gaiaTokens.isNotEmpty()) {
                     Log.i(TAG, "OAuth tokens for proto gaia_ids: ${gaiaTokens.first().take(15)}... (${gaiaTokens.first().length} chars)")
@@ -451,10 +421,9 @@ class GoogleConstellationClient(private val context: Context) {
                     spatulaHeader = spatulaHeader,
                     iidHash = iidHash
                 )
-                @Suppress("UnnecessaryVariable")
                 val rpc = rpcClient!!  // Non-null local ref for use within this try block
 
-                // 5. Get or generate client key pair (MUST persist BOTH keys like GMS does!)
+                // Get or generate client key pair (MUST persist BOTH keys like GMS does!)
                 // GMS: bekg.java:841-856 - reads from SharedPrefs "public_key", generates if missing
                 // GMS: bekf.java:92 - signs with SHA256withECDSA using private key
                 // We need to persist BOTH keys so we can sign client_credentials after server acknowledges
@@ -511,15 +480,11 @@ class GoogleConstellationClient(private val context: Context) {
                     android.util.Base64.NO_WRAP
                 )
 
-                // 5b. Check if server has acknowledged our public key (GMS bbah.java:1163)
+                // Check if server has acknowledged our public key (GMS bbah.java:1163)
                 // If true, we need to sign requests with client_credentials
                 val isPublicKeyAcked = keyPrefs.getBoolean("is_public_key_acked", false)
                 Log.d(TAG, "is_public_key_acked: $isPublicKeyAcked")
 
-                var clientSigInput: String? = null
-                var clientSigBase64: String? = null
-                var clientSigSeconds: Long? = null
-                var clientSigNanos: Int? = null
 
                 // Helper to create ClientCredentials with signature (GMS bekg.java:1166-1198, bekf.java:92)
                 // Signature string format: {iid_token}:{seconds}:{nanos} (GMS bbah.java:1178)
@@ -536,9 +501,6 @@ class GoogleConstellationClient(private val context: Context) {
                         // Build signing string: {iid_token}:{seconds}:{nanos}
                         val signingString = "$iidTokenForSig:$seconds:$nanos"
                         Log.d(TAG, "Signing string: $signingString")
-                        clientSigInput = signingString
-                        clientSigSeconds = seconds
-                        clientSigNanos = nanos
 
                         // Sign with SHA256withECDSA
                         val signature = java.security.Signature.getInstance("SHA256withECDSA")
@@ -546,10 +508,6 @@ class GoogleConstellationClient(private val context: Context) {
                         signature.update(signingString.toByteArray(Charsets.UTF_8))
                         val signatureBytes = signature.sign()
                         Log.d(TAG, "Generated signature (${signatureBytes.size} bytes)")
-                        clientSigBase64 = android.util.Base64.encodeToString(
-                            signatureBytes,
-                            android.util.Base64.NO_WRAP
-                        )
 
                         return ClientCredentials(
                             device_id = deviceIdForCreds,
@@ -625,7 +583,7 @@ class GoogleConstellationClient(private val context: Context) {
                 val telephonyInfo = buildTelephonyInfo(td)
                 Log.d(TAG, "TelephonyInfo: phoneType=${td.phoneTypeInt}, gid1=${td.groupIdLevel1}, simState=${td.simStateEnum}, serviceState=${td.serviceStateEnum}, subs=${td.activeSubCount}/${td.maxSubCount}")
 
-                // 9. Build Sync Request with ALL required fields
+                // Build Sync Request with ALL required fields
                 val sessionId = UUID.randomUUID().toString()
                 // GMS uses "language_country" format explicitly (e.g., "en_US")
                 val localeStr = Locale.getDefault().toString()
@@ -779,6 +737,21 @@ class GoogleConstellationClient(private val context: Context) {
                     ?: ""
                 val idTokenCallingPackage = callingPackage ?: ""
                 Log.i(TAG, "IdTokenRequest: certificate_hash_len=${idTokenCertificateHash.length}, calling_package=$idTokenCallingPackage, token_nonce_len=${idTokenNonce.length}, source=${if (request?.idTokenRequest != null) "aidl" else if (audienceOverride.isNotEmpty()) "override" else "empty"}")
+
+                // Build a GetVerifiedPhoneNumbersRequest (identical structure used by all GPNV call sites)
+                fun buildGpnvRequest(): GetVerifiedPhoneNumbersRequest {
+                    return GetVerifiedPhoneNumbersRequest(
+                        session_id = sessionId,
+                        client_credentials = createIidTokenAuth(readOnlyIidToken),
+                        selection_types = listOf(1),
+                        id_token_request = IdTokenRequestProto(
+                            certificate_hash = idTokenCertificateHash,
+                            calling_package = idTokenCallingPackage,
+                            token_nonce = idTokenNonce
+                        ),
+                        droidguard_result = ""
+                    )
+                }
 
                 // Stock GMS (bevm.java:1170-1253) populates ALL 5 CarrierInfo fields
                 val carrierInfo = buildCarrierInfo(
@@ -934,7 +907,7 @@ class GoogleConstellationClient(private val context: Context) {
                     verificationTokens = loadedVerificationTokens
                 )
 
-                // 9. First call GetConsent (required before Sync for new clients!)
+                // First call GetConsent (required before Sync for new clients!)
                 // From proto: "When the client is a new client coming online for the first time.
                 // It has checked the consent using GetConsent."
                 Log.d(TAG, "Calling GetConsent first...")
@@ -1087,7 +1060,7 @@ class GoogleConstellationClient(private val context: Context) {
 
                 try {
 
-                // 10. Execute Sync with retry on PERMISSION_DENIED
+                // Execute Sync with retry on PERMISSION_DENIED
                 // Stock GMS retries transient PERMISSION_DENIED ~43s later.
                 val MAX_SYNC_ATTEMPTS = 3
                 val SYNC_RETRY_DELAY_MS = 45_000L  // 45s between retries (stock GMS observed ~43s)
@@ -1121,7 +1094,7 @@ class GoogleConstellationClient(private val context: Context) {
                             rpc.clearDroidGuardTokenCache(rpc.resolveDroidGuardFlow("sync"), "Sync PERMISSION_DENIED retry $syncAttempt")
                             keyPrefs.edit().putBoolean("is_public_key_acked", false).apply()
 
-                            Thread.sleep(SYNC_RETRY_DELAY_MS)
+                            delay(SYNC_RETRY_DELAY_MS)
 
                             // Refresh DG token for next attempt
                             val freshSyncToken = rpc.getDroidGuardToken("sync", iidToken)
@@ -1157,7 +1130,7 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.d(TAG, "Received Sync response: ${response.responses.size} verifications (file write failed: ${e.message})")
                 }
 
-                // 9b. Check for public key acknowledgment in response (GMS bbah.java:1746-1758)
+                // Check for public key acknowledgment in response (GMS bbah.java:1746-1758)
                 // Path: SyncResponse.header (field 3) → ResponseHeader.client_info_update (field 1)
                 // → ClientInfoUpdate.public_key_status (field 1)
                 val publicKeyStatus = response.header_?.client_info_update?.public_key_status
@@ -1170,7 +1143,7 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.d(TAG, "Public key status: $publicKeyStatus")
                 }
 
-                // 9c. Store verification_tokens from SyncResponse (stock GMS bewt.java:192-201)
+                // Store verification_tokens from SyncResponse (stock GMS bewt.java:192-201)
                 // These are echoed back in subsequent SyncRequests for backup/restore acquisition flows.
                 val responseVerificationTokens = response.verification_tokens
                 if (responseVerificationTokens.isNotEmpty()) {
@@ -1183,7 +1156,7 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // 10. Cache SyncResponse DroidGuard token
+                // Cache SyncResponse DroidGuard token
                 val syncDgTokenResponse = response.droidguard_token_response
                 if (syncDgTokenResponse != null) {
                     val serverToken = syncDgTokenResponse.droidguard_token
@@ -1195,7 +1168,7 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // 11. Check verification responses for state
+                // Check verification responses for state
                 val responses = response.responses
                 if (responses.isEmpty()) {
                     Log.w(TAG, "No verification responses in SyncResponse")
@@ -1240,24 +1213,12 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // 12. If verified (or NONE with possible cached verification), call GetVerifiedPhoneNumbers
+                // If verified (or NONE with possible cached verification), call GetVerifiedPhoneNumbers
                 if (hasVerified) {
                     Log.i(TAG, "Calling GetVerifiedPhoneNumbers to retrieve JWT token...")
 
                     try {
-                        // Build request (GMS bevv.java:52-183, hzdo proto structure)
-                        val getTokensRequest = google.internal.communications.phonedeviceverification.v1.GetVerifiedPhoneNumbersRequest(
-                            session_id = sessionId,
-                            client_credentials = createIidTokenAuth(readOnlyIidToken),
-                            // GMS bevv.java:224-235: default = [1] (VERIFIED).
-                            selection_types = listOf(1),
-                            id_token_request = google.internal.communications.phonedeviceverification.v1.IdTokenRequestProto(
-                                certificate_hash = idTokenCertificateHash,
-                                calling_package = idTokenCallingPackage,
-                                token_nonce = idTokenNonce
-                            ),
-                            droidguard_result = ""  // Optional for read
-                        )
+                        val getTokensRequest = buildGpnvRequest()
 
                         // Create PhoneNumber client (separate service from PhoneDeviceVerification)
                         val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
@@ -1277,23 +1238,13 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // 12b. NONE state - best-effort GPNV for stock->microG swap, then check reason
+                // NONE state - best-effort GPNV for stock->microG swap, then check reason
                 // Stock GMS handles NONE separately: stores record with state=NONE, calls GPNV as
                 // independent read-only query (bevv.java). If GPNV returns nothing, no token is provided.
                 if (hasNone && !hasVerified && !hasPending) {
                     Log.i(TAG, "NONE state: trying GPNV as best-effort (stock→microG swap scenario)...")
                     try {
-                        val getTokensRequest = google.internal.communications.phonedeviceverification.v1.GetVerifiedPhoneNumbersRequest(
-                            session_id = sessionId,
-                            client_credentials = createIidTokenAuth(readOnlyIidToken),
-                            selection_types = listOf(1),
-                            id_token_request = google.internal.communications.phonedeviceverification.v1.IdTokenRequestProto(
-                                certificate_hash = idTokenCertificateHash,
-                                calling_package = idTokenCallingPackage,
-                                token_nonce = idTokenNonce
-                            ),
-                            droidguard_result = ""
-                        )
+                        val getTokensRequest = buildGpnvRequest()
                         val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
                         val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
                         if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
@@ -1336,7 +1287,7 @@ class GoogleConstellationClient(private val context: Context) {
                     return@runBlocking Ts43Client.EntitlementResult.error("5001:none-state-reason-$unverifiedReason")
                 }
 
-                // 13. Challenge dispatch loop (multi-type, multi-round)
+                // Challenge dispatch loop (multi-type, multi-round)
                 if (hasPending) {
                     Log.i(TAG, "Verification is PENDING - entering challenge dispatch loop")
 
@@ -1424,7 +1375,7 @@ class GoogleConstellationClient(private val context: Context) {
                                     val pollIndex = (round - 2).coerceAtLeast(0)  // round 1 = send, round 2+ = poll
                                     val pollDelay = pollDelays.getOrElse(pollIndex) { pollDelays.lastOrNull() ?: 5000L }
                                     Log.i(TAG, "  MO_SMS: polling round (SMS already sent), waiting ${pollDelay}ms")
-                                    Thread.sleep(pollDelay.coerceIn(1000, 30000))
+                                    delay(pollDelay.coerceIn(1000, 30000))
                                     // Return completed status for poll
                                     google.internal.communications.phonedeviceverification.v1.ChallengeResponse(
                                         mo_challenge_response = google.internal.communications.phonedeviceverification.v1.MOChallengeResponse(
@@ -1533,17 +1484,7 @@ class GoogleConstellationClient(private val context: Context) {
 
                         if (newState == VerificationState.VERIFICATION_STATE_VERIFIED) {
                             Log.i(TAG, "VERIFIED after round $round! Calling GPNV for JWT...")
-                            val getTokensRequest = google.internal.communications.phonedeviceverification.v1.GetVerifiedPhoneNumbersRequest(
-                                session_id = sessionId,
-                                client_credentials = createIidTokenAuth(readOnlyIidToken),
-                                selection_types = listOf(1),
-                                id_token_request = google.internal.communications.phonedeviceverification.v1.IdTokenRequestProto(
-                                    certificate_hash = idTokenCertificateHash,
-                                    calling_package = idTokenCallingPackage,
-                                    token_nonce = idTokenNonce
-                                ),
-                                droidguard_result = ""
-                            )
+                            val getTokensRequest = buildGpnvRequest()
                             val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
                             val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
                             if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
@@ -1617,20 +1558,7 @@ class GoogleConstellationClient(private val context: Context) {
                     // ============================================================
                     Log.i(TAG, "GPNV_FALLBACK: START - GetConsent/Sync failed, checking for cached verification")
                     try {
-                        val fallbackRequest = GetVerifiedPhoneNumbersRequest(
-                            session_id = sessionId,
-                            client_credentials = createIidTokenAuth(readOnlyIidToken),
-                            // GMS bevv.java:224-235: default = [1] (VERIFIED).
-                            selection_types = listOf(1),
-                            id_token_request = IdTokenRequestProto(
-                                certificate_hash = idTokenCertificateHash,
-                                calling_package = idTokenCallingPackage,
-                                token_nonce = idTokenNonce
-                            ),
-                            // No DG token: relies on server-side
-                            // VerifyPhoneNumberApi__ignore_droid_guard_requirement (default true).
-                            droidguard_result = ""
-                        )
+                        val fallbackRequest = buildGpnvRequest()
 
                         Log.i(TAG, "GPNV_FALLBACK: Calling GetVerifiedPhoneNumbers after verification state: sync-failed")
                         val fallbackResponse = rpc.getVerifiedPhoneNumbers(fallbackRequest)

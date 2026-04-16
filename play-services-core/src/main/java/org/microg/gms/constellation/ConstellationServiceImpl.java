@@ -24,7 +24,6 @@ import com.google.android.gms.constellation.GetIidTokenResponse;
 import com.google.android.gms.constellation.GetPnvCapabilitiesRequest;
 import com.google.android.gms.constellation.GetPnvCapabilitiesResponse;
 import com.google.android.gms.constellation.ImsiRequest;
-import com.google.android.gms.constellation.PhoneNumberInfo;
 import com.google.android.gms.constellation.PhoneNumberVerification;
 import com.google.android.gms.constellation.VerifyPhoneNumberRequest;
 import com.google.android.gms.constellation.VerifyPhoneNumberResponse;
@@ -54,7 +53,6 @@ import java.util.List;
 public class ConstellationServiceImpl extends IConstellationApiService.Stub {
     private static final String TAG = "GmsConstellationSvcImpl";
 
-    private static final long VERIFICATION_TTL_MS = 86400000L; // 24 hours
     // Binder framework transaction used to query the interface descriptor string.
     // Numeric value is 1598968902 (0x5f4e5446). Defined by android.os.IBinder.
     // Verified in our local decompiled AIDL stubs too (example:
@@ -291,7 +289,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
      */
     @Override
     public void verifyPhoneNumber(IConstellationCallbacks callbacks, VerifyPhoneNumberRequest request, ApiMetadata metadata) throws RemoteException {
-        Log.i(TAG, "verifyPhoneNumber() called - THIS IS THE KEY RCS METHOD");
+        Log.i(TAG, "verifyPhoneNumber() called");
         // Force manual MSISDN entry for testing. Returns status 7 on EVERY call until cleared.
         //   adb shell settings put global microg_constellation_force_manual_msisdn 1
         //   adb shell settings delete global microg_constellation_force_manual_msisdn
@@ -326,7 +324,6 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
                 String nonce = request.idTokenRequest.nonce;
                 Log.d(TAG, "  idTokenRequest: audience_len=" + (audience != null ? audience.length() : -1) + ", nonce_len=" + (nonce != null ? nonce.length() : -1));
             }
-            Log.d(TAG, "  requestPathClass: " + classifyRequestPath(request));
         }
         Log.d(TAG, "  metadata: " + metadata);
 
@@ -382,7 +379,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             // MANUAL MSISDN PATH: Server returned PHONE_NUMBER_ENTRY_REQUIRED (reason=5).
             // Return Status.SUCCESS + verificationStatus=7 so Messages shows phone input UI.
             // Messages then re-calls verifyPhoneNumber() with user-entered number.
-            // This is NOT the old bug (S143) - that was status=7 on ALL errors causing tight loops.
+            // This is NOT the old bug - that was status=7 on ALL errors causing tight loops.
             // Here we return status=7 ONLY when the server explicitly requests manual MSISDN.
             // ============================================================
             if (entitlement.needsManualMsisdn) {
@@ -518,22 +515,6 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             Log.w(TAG, "Failed to resolve packages for uid=" + uid, e);
             return new String[0];
         }
-    }
-
-    private String classifyRequestPath(VerifyPhoneNumberRequest request) {
-        if (request == null) return "NULL_REQUEST";
-
-        String requiredConsent = null;
-        String consentType = null;
-        if (request.extras != null) {
-            requiredConsent = request.extras.getString("required_consumer_consent");
-            consentType = request.extras.getString("consent_type");
-        }
-
-        if ("RCS".equals(requiredConsent)) return "RCS_PROVISIONING_PATH";
-        if ("am_profiles".equals(request.policyId)) return "ASTERISM_PROFILES_WORKER_PATH";
-        if (requiredConsent == null && consentType == null) return "GENERIC_NO_CONSENT_EXTRAS_PATH";
-        return "OTHER_PATH";
     }
 
     private String transactionName(int code) {

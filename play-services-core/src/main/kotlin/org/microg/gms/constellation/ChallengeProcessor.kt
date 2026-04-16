@@ -163,6 +163,19 @@ object SmsInbox {
 
 object ChallengeProcessor {
 
+    private fun moFailedToSend() = ChallengeResponse(
+        mo_challenge_response = MOChallengeResponse(
+            status = MOChallengeStatus.MO_STATUS_FAILED_TO_SEND
+        )
+    )
+
+    private fun ts43InternalError(ts43Type: Ts43Type?) = ChallengeResponse(
+        ts43_challenge_response = Ts43ChallengeResponse(
+            ts43_type = ts43Type,
+            error = Error(error_type = ErrorType.ERROR_TYPE_INTERNAL_ERROR)
+        )
+    )
+
     /**
      * Send MO SMS to proxy_number from server challenge. Returns ChallengeResponse.
      * Sends SMS and waits for delivery confirmation.
@@ -176,20 +189,12 @@ object ChallengeProcessor {
         val smsText = moChallenge.sms
         if (proxyNumber.isEmpty() || smsText.isEmpty()) {
             Log.w(TAG, "MO SMS: empty proxy_number or sms text")
-            return ChallengeResponse(
-                mo_challenge_response = MOChallengeResponse(
-                    status = MOChallengeStatus.MO_STATUS_FAILED_TO_SEND
-                )
-            )
+            return moFailedToSend()
         }
         if (context.checkCallingOrSelfPermission(android.Manifest.permission.SEND_SMS)
             != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             Log.w(TAG, "MO SMS: SEND_SMS permission not granted")
-            return ChallengeResponse(
-                mo_challenge_response = MOChallengeResponse(
-                    status = MOChallengeStatus.MO_STATUS_FAILED_TO_SEND
-                )
-            )
+            return moFailedToSend()
         }
 
         val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -264,19 +269,11 @@ object ChallengeProcessor {
                     Log.e(TAG, "MO SMS send failed: ${e.message}")
                     try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
                     if (continuation.isActive) {
-                        continuation.resume(ChallengeResponse(
-                            mo_challenge_response = MOChallengeResponse(
-                                status = MOChallengeStatus.MO_STATUS_FAILED_TO_SEND
-                            )
-                        )) {}
+                        continuation.resume(moFailedToSend()) {}
                     }
                 }
             }
-        } ?: ChallengeResponse(
-            mo_challenge_response = MOChallengeResponse(
-                status = MOChallengeStatus.MO_STATUS_FAILED_TO_SEND
-            )
-        )
+        } ?: moFailedToSend()
     }
 
     /**
@@ -349,14 +346,7 @@ object ChallengeProcessor {
             val entitlementUrl = ts43Challenge.entitlement_url
             if (entitlementUrl.isNullOrEmpty()) {
                 Log.w(TAG, "  TS43: empty entitlement_url in challenge")
-                return ChallengeResponse(
-                    ts43_challenge_response = Ts43ChallengeResponse(
-                        ts43_type = ts43Challenge.ts43_type,
-                        error = Error(
-                            error_type = ErrorType.ERROR_TYPE_INTERNAL_ERROR
-                        )
-                    )
-                )
+                return ts43InternalError(ts43Challenge.ts43_type)
             }
 
             val ts43Client = Ts43Client(context)
@@ -367,14 +357,7 @@ object ChallengeProcessor {
             Log.i(TAG, "  TS43: result ineligible=${result.ineligible} error=${result.isError} token=${result.token?.length ?: 0} chars")
 
             if (result.isError) {
-                return ChallengeResponse(
-                    ts43_challenge_response = Ts43ChallengeResponse(
-                        ts43_type = ts43Challenge.ts43_type,
-                        error = Error(
-                            error_type = ErrorType.ERROR_TYPE_INTERNAL_ERROR
-                        )
-                    )
-                )
+                return ts43InternalError(ts43Challenge.ts43_type)
             }
 
             // Route result to correct proto field based on challenge type
@@ -401,14 +384,7 @@ object ChallengeProcessor {
             )
         } catch (e: Exception) {
             Log.e(TAG, "  TS43: exception: ${e.javaClass.simpleName}: ${e.message}")
-            return ChallengeResponse(
-                ts43_challenge_response = Ts43ChallengeResponse(
-                    ts43_type = ts43Challenge.ts43_type,
-                    error = Error(
-                        error_type = ErrorType.ERROR_TYPE_INTERNAL_ERROR
-                    )
-                )
-            )
+            return ts43InternalError(ts43Challenge.ts43_type)
         }
     }
 }
