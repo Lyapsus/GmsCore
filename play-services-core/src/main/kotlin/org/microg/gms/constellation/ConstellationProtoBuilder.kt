@@ -626,8 +626,8 @@ fun bundleToParams(bundle: Bundle?): List<Param> {
 }
 
 /**
- * Rebuild a SyncRequest with a different DG token (for retry).
- * Preserves all fields except device_signals in ClientInfo.
+ * Rebuild a SyncRequest swapping only ClientInfo.device_signals. All other fields preserved
+ * via Wire-generated copy() — forward-safe against proto additions.
  */
 fun rebuildSyncRequestWithDg(
     original: SyncRequest,
@@ -636,38 +636,9 @@ fun rebuildSyncRequestWithDg(
     val deviceSignals = if (droidGuardToken != null) {
         DeviceSignals(droidguard_token = droidGuardToken)
     } else {
-        DeviceSignals() // Empty - no DG
+        DeviceSignals()
     }
-    val newClientInfo = original.header_?.client_info?.let { ci ->
-        ClientInfo(
-            device_id = ci.device_id,
-            client_public_key = ci.client_public_key,
-            locale = ci.locale,
-            gmscore_version_number = ci.gmscore_version_number,
-            gmscore_version = ci.gmscore_version,
-            android_sdk_version = ci.android_sdk_version,
-            device_signals = deviceSignals,
-            has_read_privileged_phone_state_permission = ci.has_read_privileged_phone_state_permission,
-            registered_app_ids = ci.registered_app_ids,
-            country_info = ci.country_info,
-            connectivity_infos = ci.connectivity_infos,
-            is_standalone_device = ci.is_standalone_device,
-            telephony_info_container = ci.telephony_info_container,
-            model = ci.model,
-            manufacturer = ci.manufacturer,
-            device_fingerprint = ci.device_fingerprint,
-            device_type = ci.device_type,
-            experiment_infos = ci.experiment_infos
-        )
-    }
-    return SyncRequest(
-        verifications = original.verifications,
-        header_ = RequestHeader(
-            client_info = newClientInfo,
-            client_credentials = original.header_?.client_credentials,
-            session_id = original.header_?.session_id ?: "",
-            trigger = original.header_?.trigger
-        ),
-        verification_tokens = original.verification_tokens
-    )
+    val newClientInfo = original.header_?.client_info?.copy(device_signals = deviceSignals)
+    val newHeader = original.header_?.copy(client_info = newClientInfo)
+    return original.copy(header_ = newHeader)
 }
