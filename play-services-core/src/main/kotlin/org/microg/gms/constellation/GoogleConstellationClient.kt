@@ -22,15 +22,10 @@ import android.util.Log
 import android.content.pm.PackageManager
 import org.microg.gms.common.Constants
 import java.io.File
-import com.google.android.gms.tasks.Tasks
-import com.squareup.wire.GrpcClient
 import kotlinx.coroutines.runBlocking
-import okhttp3.OkHttpClient
 import okio.ByteString
 import okio.ByteString.Companion.decodeBase64
 import org.microg.gms.common.PackageUtils
-import org.microg.gms.droidguard.DroidGuardClientImpl
-import com.google.android.gms.droidguard.DroidGuardHandle
 import org.microg.gms.gcm.GcmDatabase
 import org.microg.gms.auth.AuthConstants
 import org.microg.gms.auth.AuthManager
@@ -42,7 +37,6 @@ import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 import google.internal.communications.phonedeviceverification.v1.ClientInfo
@@ -55,7 +49,6 @@ import google.internal.communications.phonedeviceverification.v1.DeviceId
 import google.internal.communications.phonedeviceverification.v1.DeviceSignals
 import google.internal.communications.phonedeviceverification.v1.DeviceType
 import google.internal.communications.phonedeviceverification.v1.AsterismClient
-import google.internal.communications.phonedeviceverification.v1.GrpcPhoneDeviceVerificationClient
 import google.internal.communications.phonedeviceverification.v1.RequestHeader
 import google.internal.communications.phonedeviceverification.v1.RequestTrigger
 import google.internal.communications.phonedeviceverification.v1.SIMAssociation
@@ -91,7 +84,6 @@ import google.internal.communications.phonedeviceverification.v1.DroidGuardToken
 import google.internal.communications.phonedeviceverification.v1.GetVerifiedPhoneNumbersRequest
 import google.internal.communications.phonedeviceverification.v1.ClientCredentialsProto
 import google.internal.communications.phonedeviceverification.v1.IdTokenRequestProto
-import google.internal.communications.phonedeviceverification.v1.GrpcPhoneNumberClient
 import google.internal.communications.phonedeviceverification.v1.ProceedRequest
 import google.internal.communications.phonedeviceverification.v1.ChallengeResponse
 import google.internal.communications.phonedeviceverification.v1.MTChallengeResponse
@@ -112,11 +104,6 @@ class GoogleConstellationClient(private val context: Context) {
         private const val GMSCORE_VERSION = "26.02.33 (190400-858744110)"
         private const val GAIA_TOKEN_SCOPE = "oauth2:https://www.googleapis.com/auth/numberer"
 
-        // Debug-only DG flow experiment knobs (default behavior unchanged when unset)
-        // settings put global microg_constellation_dg_flow_override <flow>
-        // settings put global microg_constellation_dg_flow_rpc_map "getConsent=...,sync=...,proceed=..."
-        private const val DG_FLOW_OVERRIDE_GLOBAL_KEY = "microg_constellation_dg_flow_override"
-        private const val DG_FLOW_OVERRIDE_RPC_MAP_KEY = "microg_constellation_dg_flow_rpc_map"
         // settings put global microg_constellation_force_one_time_verification off
         private const val FORCE_ONE_TIME_VERIFICATION_KEY = "microg_constellation_force_one_time_verification"
 
@@ -439,8 +426,7 @@ class GoogleConstellationClient(private val context: Context) {
             Log.d(TAG, "Using API key auth with package=$packageName, cert=$certSha1")
 
             runBlocking {
-                // S163: DG handle declared at runBlocking scope for finally cleanup
-                var dgHandle: DroidGuardHandle? = null
+                var rpcClient: ConstellationRpcClient? = null
                 try {
                 // 2. Get IID token - MUST be registered with Constellation project ID!
                 // Uses shared method that handles caching, registration, and fallbacks
@@ -461,97 +447,6 @@ class GoogleConstellationClient(private val context: Context) {
                     android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)  // Flag 3 = NO_PADDING | NO_WRAP
                 val iidHash = iidHashFull.substring(0, 32)  // Truncate to 32 chars like GMS
 
-                // ============================================================
-                // DroidGuard Token Caching (per GMS bewt.java:1111-1128, 180-191)
-                // ============================================================
-                // GMS caches processed tokens from GetConsentResponse.field_9:
-                //   - First request: sends raw ~43K token (CgZ... protobuf format)
-                //   - Server returns processed ~6.8K token (ARfb... custom format) + TTL
-                //   - Subsequent requests: use cached processed token
-                // We implement the same caching to match GMS behavior.
-
-                val dgCachePrefs = context.getSharedPreferences("constellation_prefs", Context.MODE_PRIVATE)
-
-                fun parseRpcFlowOverrides(raw: String?): Map<String, String> {
-                    if (raw.isNullOrBlank()) return emptyMap()
-                    val out = mutableMapOf<String, String>()
-                    raw.split(',', ';', '\n').forEach { entry ->
-                        val trimmed = entry.trim()
-                        if (trimmed.isEmpty()) return@forEach
-                        val idx = trimmed.indexOf('=')
-                        if (idx <= 0 || idx >= trimmed.length - 1) return@forEach
-                        val rpc = trimmed.substring(0, idx).trim()
-                        val flow = trimmed.substring(idx + 1).trim()
-                        if (rpc.isNotEmpty() && flow.isNotEmpty()) {
-                            out[rpc] = flow
-                        }
-                    }
-                    return out
-                }
-
-                val globalFlowOverride = Settings.Global.getString(
-                    context.contentResolver,
-                    DG_FLOW_OVERRIDE_GLOBAL_KEY
-                )?.trim()?.takeIf { it.isNotEmpty() }
-
-                val rpcFlowOverrides = parseRpcFlowOverrides(
-                    Settings.Global.getString(context.contentResolver, DG_FLOW_OVERRIDE_RPC_MAP_KEY)
-                )
-
-                if (globalFlowOverride != null) {
-                    Log.w(TAG, "DG flow experiment: global override enabled '$globalFlowOverride' (key=$DG_FLOW_OVERRIDE_GLOBAL_KEY)")
-                }
-                if (rpcFlowOverrides.isNotEmpty()) {
-                    Log.w(TAG, "DG flow experiment: per-RPC override map enabled $rpcFlowOverrides (key=$DG_FLOW_OVERRIDE_RPC_MAP_KEY)")
-                }
-
-                fun resolveDroidGuardFlow(rpcMethod: String): String {
-                    return rpcFlowOverrides[rpcMethod]
-                        ?: globalFlowOverride
-                        ?: "constellation_verify"
-                }
-
-                fun flowCacheKeys(flow: String): Triple<String, String, String> {
-                    if (flow == "constellation_verify") {
-                        return Triple("droidguard_token", "droidguard_token_ttl", "droidguard_token_iid")
-                    }
-                    val safeFlow = flow.replace(Regex("[^A-Za-z0-9_.-]"), "_")
-                    return Triple("droidguard_token_$safeFlow", "droidguard_token_ttl_$safeFlow", "droidguard_token_iid_$safeFlow")
-                }
-
-                // Check for cached DroidGuard token (GMS bewt.java reads from SharedPrefs)
-                fun getCachedDroidGuardToken(flow: String): Triple<String?, Long, String?> {
-                    val (tokenKey, ttlKey, iidKey) = flowCacheKeys(flow)
-                    val cachedToken = dgCachePrefs.getString(tokenKey, null)
-                    val cachedTtl = dgCachePrefs.getLong(ttlKey, 0L)
-                    val cachedIid = dgCachePrefs.getString(iidKey, null)
-                    return Triple(cachedToken, cachedTtl, cachedIid)
-                }
-
-                // Cache DroidGuard token from server response (GMS bewt.java:1111-1128)
-                // Also stores the IID token used to generate this DG token, so we can
-                // invalidate the cache if the IID changes (DG tokens are session-bound via iidHash).
-                fun cacheDroidGuardToken(flow: String, token: String, ttlMillis: Long, currentIid: String) {
-                    val (tokenKey, ttlKey, iidKey) = flowCacheKeys(flow)
-                    Log.i(TAG, "Caching DroidGuard token for flow '$flow': ${token.length} chars, TTL=${java.util.Date(ttlMillis)}, IID=${currentIid.take(20)}...")
-                    dgCachePrefs.edit()
-                        .putString(tokenKey, token)
-                        .putLong(ttlKey, ttlMillis)
-                        .putString(iidKey, currentIid)
-                        .apply()
-                }
-
-                // Clear cached token on auth errors (GMS bewt.java:180-191)
-                fun clearDroidGuardTokenCache(flow: String, reason: String) {
-                    val (tokenKey, ttlKey, iidKey) = flowCacheKeys(flow)
-                    Log.w(TAG, "Clearing DroidGuard token cache for flow '$flow': $reason")
-                    dgCachePrefs.edit()
-                        .remove(tokenKey)
-                        .remove(ttlKey)
-                        .remove(iidKey)
-                        .apply()
-                }
-
                 // Load stored verification_tokens for SyncRequest (stock GMS bewt.java:702-704)
                 fun loadVerificationTokens(prefs: android.content.SharedPreferences): List<google.internal.communications.phonedeviceverification.v1.VerificationToken> {
                     val stored = prefs.getStringSet("verification_tokens", null) ?: return emptyList()
@@ -566,149 +461,7 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // S163: DG Handle Reuse - stock GMS (bfox.java) creates ONE handle per session
-                // and calls snapshot() with different rpc bindings. microG was creating a new handle
-                // per RPC, which loses VM session state. Now we init once and reuse.
-                // dgHandle declared at runBlocking scope (above) for finally cleanup
-                var dgHandleFlow: String? = null
-
-                fun openOrReuseDgHandle(dgFlow: String): DroidGuardHandle? {
-                    val existing = dgHandle
-                    if (existing != null && existing.isOpened() && dgHandleFlow == dgFlow) {
-                        Log.d(TAG, "DG handle REUSE (flow=$dgFlow)")
-                        return existing
-                    }
-                    // Close stale handle if any
-                    if (existing != null) {
-                        try { existing.close() } catch (_: Exception) {}
-                        dgHandle = null
-                        dgHandleFlow = null
-                    }
-                    Log.i(TAG, "DG handle OPEN (flow=$dgFlow) - calling DroidGuardClientImpl.init()")
-                    val droidGuard = DroidGuardClientImpl(context)
-                    Log.i(TAG, "DG client created, calling init($dgFlow)")
-                    val handleTask = droidGuard.init(dgFlow, null)
-                    Log.i(TAG, "DG init() returned Task, isComplete=${handleTask.isComplete}, isCanceled=${handleTask.isCanceled}")
-                    return try {
-                        Log.i(TAG, "DG Tasks.await() START (30s timeout)")
-                        val handle = Tasks.await(handleTask, 30, TimeUnit.SECONDS)
-                        Log.i(TAG, "DG Tasks.await() COMPLETED - handle=${handle?.javaClass?.simpleName}")
-                        dgHandle = handle
-                        dgHandleFlow = dgFlow
-                        handle
-                    } catch (e: Exception) {
-                        Log.e(TAG, "DG handle init failed: ${e.javaClass.simpleName}: ${e.message}")
-                        Log.e(TAG, "DG stack trace:", e)
-                        null
-                    }
-                }
-
-                fun closeDgHandle() {
-                    dgHandle?.let {
-                        try { it.close() } catch (_: Exception) {}
-                        Log.d(TAG, "DG handle CLOSED")
-                    }
-                    dgHandle = null
-                    dgHandleFlow = null
-                }
-
-                // Helper function to generate RPC-specific DroidGuard token
-                // CRITICAL: Each API method REQUIRES its own token with matching RPC binding!
-                // GMS bewt.java (v26.02.33) passes LOWERCASE METHOD NAME as "rpc" binding:
-                //   bewt.java:480 → "getConsent"
-                //   bewt.java:694 → "sync"
-                // Then bfox.java:80 → goyu.o("iidHash", c(str), "rpc", str2)
-                // DroidGuard HMAC-binds the token to these inputs - wrong value = server rejection
-                //
-                // S163: Uses handle reuse - init once, snapshot() per RPC (matches stock bfox pattern)
-                fun getDroidGuardToken(rpcMethod: String): String? {
-                    Log.d(TAG, "getDroidGuardToken($rpcMethod) called")
-
-                    val dgFlow = resolveDroidGuardFlow(rpcMethod)
-                    if (dgFlow != "constellation_verify") {
-                        Log.w(TAG, "DG flow experiment ACTIVE: rpc=$rpcMethod flow=$dgFlow")
-                    }
-
-                    // Step 1: Check cache first (like GMS does)
-                    val (cachedToken, cachedTtl, cachedIid) = getCachedDroidGuardToken(dgFlow)
-                    val now = System.currentTimeMillis()
-                    val currentIid = iidToken
-
-                    if (cachedToken != null && cachedTtl > 0) {
-                        // Check IID binding: DG tokens are session-bound via iidHash
-                        if (cachedIid != null && currentIid != null && cachedIid != currentIid) {
-                            Log.w(TAG, "DG token cache invalidated: IID changed from ${cachedIid.take(20)}... to ${currentIid.take(20)}...")
-                            clearDroidGuardTokenCache(dgFlow, "IID token changed (iidHash won't match)")
-                        } else {
-                            val ttlRemaining = cachedTtl - now
-                            val ttlRemainingHours = ttlRemaining / (1000 * 60 * 60)
-
-                            if (ttlRemaining > 0) {
-                                Log.i(TAG, "DroidGuard cache HIT for $rpcMethod:")
-                                Log.i(TAG, "  - Cached token: ${cachedToken.length} chars, prefix=${cachedToken.take(10)}...")
-                                Log.i(TAG, "  - TTL expires: ${java.util.Date(cachedTtl)} (~${ttlRemainingHours}h remaining)")
-                                if (cachedIid != null) Log.d(TAG, "  - DG token cache valid: IID matches")
-                                Log.i(TAG, "  - Using CACHED token instead of calling DroidGuard VM")
-                                return cachedToken
-                            } else {
-                                Log.w(TAG, "DroidGuard cache EXPIRED for $rpcMethod:")
-                                Log.w(TAG, "  - Expired at: ${java.util.Date(cachedTtl)} (${-ttlRemainingHours}h ago)")
-                                Log.w(TAG, "  - Will generate fresh token from VM")
-                                clearDroidGuardTokenCache(dgFlow, "TTL expired")
-                            }
-                        }
-                    } else {
-                        Log.d(TAG, "DroidGuard cache MISS for $rpcMethod (no cached token)")
-                    }
-
-                    // Step 2: Generate fresh token via reused DG handle (S163: matches stock bfox pattern)
-                    Log.d(TAG, "Calling DroidGuard VM for $rpcMethod...")
-                    Log.d(TAG, "  - Flow: $dgFlow")
-                    Log.d(TAG, "  - Bindings: iidHash=${iidHash.take(10)}..., rpc=$rpcMethod")
-
-                    val handle = openOrReuseDgHandle(dgFlow) ?: return null
-                    val dgBindings = mapOf(
-                        "iidHash" to iidHash,
-                        "rpc" to rpcMethod
-                    )
-                    return try {
-                        val token = handle.snapshot(dgBindings)
-                        if (token != null) {
-                            Log.i(TAG, "DroidGuard VM returned token for $rpcMethod:")
-                            Log.i("MicroGRcs", "constellation DG=${token.length}chars rpc=$rpcMethod")
-                            Log.i(TAG, "  - Length: ${token.length} chars")
-                            Log.i(TAG, "  - Prefix: ${token.take(20)}...")
-                            val format = when {
-                                token.startsWith("CgZ") || token.startsWith("Cg") -> "RAW_PROTOBUF (from VM)"
-                                token.startsWith("ARfb") -> "PROCESSED (should be from cache!)"
-                                token.startsWith("ERROR") -> "ERROR"
-                                else -> "UNKNOWN"
-                            }
-                            Log.i(TAG, "  - Format: $format")
-                            // DG quality gate: warn if token is suspiciously small
-                            if (token.length < 30000) {
-                                Log.w(TAG, "  ⚠ DG TOKEN QUALITY WARNING: ${token.length} chars < 30000")
-                                Log.w(TAG, "    Stock GMS produces ~43K. If .unstable is in Magisk denylist,")
-                                Log.w(TAG, "    CleveresTricky can't inject → smaller tokens → server may reject.")
-                            } else {
-                                Log.i(TAG, "  ✓ DG token size OK (${token.length} chars)")
-                            }
-                        } else {
-                            Log.e(TAG, "DroidGuard VM returned NULL for $rpcMethod")
-                        }
-                        token
-                    } catch (e: Exception) {
-                        Log.e(TAG, "DroidGuard VM failed for $rpcMethod: ${e.javaClass.simpleName}: ${e.message}")
-                        null
-                    }
-                }
-
-                // Now call the actual Constellation API with the DroidGuard token
-                // 3. Setup Grpc Client with API Key + Spatula auth
-                // Stock GMS Constellation uses: X-Goog-Api-Key, X-Android-Package, X-Android-Cert, X-Goog-Spatula
-                // Stock GMS does NOT use OAuth Bearer on gRPC transport (bewt.c bdpb has no account/scopes,
-                // bedm.n() returns null, iluw Authorization interceptor is never created).
-                // GetConsent has OAuth in proto body (gaia_ids field 2). Sync has no proto-level OAuth.
+                // 3. Setup gRPC + DG via ConstellationRpcClient
                 val gaiaTokens = getGaiaTokens(packageName)
                 if (gaiaTokens.isNotEmpty()) {
                     Log.i(TAG, "OAuth tokens for proto gaia_ids: ${gaiaTokens.first().take(15)}... (${gaiaTokens.first().length} chars)")
@@ -739,42 +492,16 @@ class GoogleConstellationClient(private val context: Context) {
                     null
                 }
 
-                val okHttpClient = OkHttpClient.Builder()
-                    // Stock GMS uses 60s timeouts (decompiled). OkHttp default is 10s.
-                    // Server regularly takes 11-15s during MO SMS challenge flows.
-                    .connectTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                    .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                    .addInterceptor { chain ->
-                        val original = chain.request()
-                        val requestBuilder = original.newBuilder()
-                            .header("X-Goog-Api-Key", API_KEY)
-                            .header("X-Android-Package", packageName)
-                            .header("X-Android-Cert", certSha1 ?: "")
-                            // Stock GMS user-agent: "grpc-java-cronet/1.79.0-SNAPSHOT" (imcx.java:189-192)
-                            // microG default is "okhttp/4.12.0" which is NOT a gRPC user-agent
-                            .header("User-Agent", "grpc-java-cronet/1.79.0-SNAPSHOT")
-                        // Stock GMS sends X-Goog-Spatula on every Constellation RPC (beeb.java:217-219 → ilup interceptor)
-                        if (!spatulaHeader.isNullOrEmpty()) {
-                            requestBuilder.header("X-Goog-Spatula", spatulaHeader)
-                        }
-                        val request = requestBuilder
-                            .method(original.method, original.body)
-                            .build()
-                        chain.proceed(request)
-                    }
-                    .build()
-
-                val grpcClient = GrpcClient.Builder()
-                    .client(okHttpClient)
-                    .baseUrl("https://phonedeviceverification-pa.googleapis.com/")
-                    // Stock GMS (Cronet gRPC) does NOT compress outgoing messages.
-                    // Wire default minMessageToCompress=0 sends grpc-encoding:gzip on ALL requests.
-                    // Server may reject gzip-encoded protos with INVALID_ARGUMENT.
-                    .minMessageToCompress(Long.MAX_VALUE)
-                    .build()
-
-                val client = GrpcPhoneDeviceVerificationClient(grpcClient)
+                rpcClient = ConstellationRpcClient(
+                    context = context,
+                    apiKey = API_KEY,
+                    packageName = packageName,
+                    certSha1 = certSha1,
+                    spatulaHeader = spatulaHeader,
+                    iidHash = iidHash
+                )
+                @Suppress("UnnecessaryVariable")
+                val rpc = rpcClient!!  // Non-null local ref for use within this try block
 
                 // 5. Get or generate client key pair (MUST persist BOTH keys like GMS does!)
                 // GMS: bekg.java:841-856 - reads from SharedPrefs "public_key", generates if missing
@@ -857,11 +584,9 @@ class GoogleConstellationClient(private val context: Context) {
                     val ecKeySource = if (!storedPublicKeyBase64.isNullOrEmpty() && !storedPrivateKeyBase64.isNullOrEmpty()) "LOADED from constellation_prefs" else "GENERATED NEW"
 
                     // DG cache for each RPC
-                    fun dgCacheSummary(rpc: String): String {
-                        val flow = resolveDroidGuardFlow(rpc)
-                        val (tokenKey, ttlKey) = flowCacheKeys(flow)
-                        val token = dgCachePrefs.getString(tokenKey, null)
-                        val ttl = dgCachePrefs.getLong(ttlKey, 0L)
+                    fun dgCacheSummary(rpcMethod: String): String {
+                        val flow = rpc.resolveDroidGuardFlow(rpcMethod)
+                        val (token, ttl, _) = rpc.getCachedDroidGuardToken(flow)
                         if (token == null) return "MISS (no cached token)"
                         val remaining = ttl - now
                         val prefix = token.take(10)
@@ -1516,8 +1241,8 @@ class GoogleConstellationClient(private val context: Context) {
                 // Generate Sync-specific DroidGuard token
                 // GMS bewt.java:694 passes lowercase method name as DG rpc binding
                 // S167: Try raw DG first; if PERMISSION_DENIED, retry without DG (coverage of both paths)
-                val syncTokenRaw = getDroidGuardToken("sync")
-                val (cachedArfb, _, _) = getCachedDroidGuardToken(resolveDroidGuardFlow("sync"))
+                val syncTokenRaw = rpc.getDroidGuardToken("sync", iidToken)
+                val (cachedArfb, _, _) = rpc.getCachedDroidGuardToken(rpc.resolveDroidGuardFlow("sync"))
                 val syncToken = cachedArfb ?: syncTokenRaw  // Prefer ARfb, fall back to raw DG
                 Log.i(TAG, "Sync DG: using ${if (cachedArfb != null) "cached ARfb" else if (syncToken != null) "raw DG" else "NONE (will retry)"} (${syncToken?.length ?: 0} chars)")
 
@@ -1624,7 +1349,7 @@ class GoogleConstellationClient(private val context: Context) {
 
                 // Generate GetConsent-specific DroidGuard token
                 // GMS bewt.java:480 passes lowercase method name as DG rpc binding
-                val getConsentToken = getDroidGuardToken("getConsent")
+                val getConsentToken = rpc.getDroidGuardToken("getConsent", iidToken)
                 if (getConsentToken == null) {
                     Log.w(TAG, "DroidGuard token for GetConsent FAILED - proceeding WITHOUT DG (no-DG-first strategy, S163 proved this works)")
                 }
@@ -1663,7 +1388,7 @@ class GoogleConstellationClient(private val context: Context) {
                 }
 
                 try {
-                    val consentResponse = client.GetConsent().execute(consentRequest)
+                    val consentResponse = rpc.getConsent(consentRequest)
                     Log.i(TAG, "GetConsent SUCCESS!")
 
                     // S110: Dump ALL response fields to understand what server returns
@@ -1721,7 +1446,7 @@ class GoogleConstellationClient(private val context: Context) {
                             Log.i(TAG, "  - Format: ${if (isProcessed) "PROCESSED (ARfb)" else if (wasRaw) "RAW (unexpected!)" else "UNKNOWN"}")
 
                             // Cache it globally (stock GMS uses single key for all RPCs)
-                            cacheDroidGuardToken(resolveDroidGuardFlow("getConsent"), serverToken, ttlMillis, iidToken)
+                            rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("getConsent"), serverToken, ttlMillis, iidToken)
                             Log.i(TAG, "  - CACHED for future requests (including Sync)!")
                         } else {
                             Log.w(TAG, "  - Token is empty, not caching")
@@ -1752,7 +1477,7 @@ class GoogleConstellationClient(private val context: Context) {
                             try {
                                 val noDgRequest = buildSetConsentRequest(sessionId, protoCtx, null)
                                 Log.d(TAG, "SetConsent request size (no DG): ${noDgRequest.encode().size} bytes")
-                                client.SetConsent().execute(noDgRequest)
+                                rpc.setConsent(noDgRequest)
                                 Log.i(TAG, "SetConsent SUCCESS (no DG)! Server accepted consent without DroidGuard.")
                                 setConsentSucceeded = true
                             } catch (e1: Exception) {
@@ -1761,12 +1486,12 @@ class GoogleConstellationClient(private val context: Context) {
                                 if (code1 == 7) {
                                     // PERMISSION_DENIED - retry with DG token
                                     Log.d(TAG, "SetConsent attempt 2: WITH DroidGuard token")
-                                    val setConsentToken = getDroidGuardToken("setConsent")
+                                    val setConsentToken = rpc.getDroidGuardToken("setConsent", iidToken)
                                     if (setConsentToken != null) {
                                         try {
                                             val dgRequest = buildSetConsentRequest(sessionId, protoCtx, setConsentToken)
                                             Log.d(TAG, "SetConsent request size (with DG): ${dgRequest.encode().size} bytes")
-                                            client.SetConsent().execute(dgRequest)
+                                            rpc.setConsent(dgRequest)
                                             Log.i(TAG, "SetConsent SUCCESS (with DG)!")
                                             setConsentSucceeded = true
                                         } catch (e2: Exception) {
@@ -1787,7 +1512,7 @@ class GoogleConstellationClient(private val context: Context) {
                             // If SetConsent succeeded, retry GetConsent to get ARfb
                             if (setConsentSucceeded) {
                                 Log.d(TAG, "Retrying GetConsent to obtain ARfb token...")
-                                val retryToken = getDroidGuardToken("getConsent")
+                                val retryToken = rpc.getDroidGuardToken("getConsent", iidToken)
                                 if (retryToken != null) {
                                     val retryRequest = buildGetConsentRequest(
                                         sessionId = sessionId,
@@ -1796,13 +1521,13 @@ class GoogleConstellationClient(private val context: Context) {
                                         registeredAppIds = registeredAppIds,
                                         params = params
                                     )
-                                    val retryResponse = client.GetConsent().execute(retryRequest)
+                                    val retryResponse = rpc.getConsent(retryRequest)
                                     Log.i(TAG, "GetConsent retry: consent=${retryResponse.device_consent?.consent}")
 
                                     val retryDg = retryResponse.droidguard_token_response
                                     if (retryDg != null && !retryDg.droidguard_token.isNullOrEmpty()) {
                                         val ttl = try { retryDg.droidguard_token_ttl?.toEpochMilli() ?: 0L } catch (_: Exception) { 0L }
-                                        cacheDroidGuardToken(resolveDroidGuardFlow("getConsent"), retryDg.droidguard_token!!, ttl, iidToken)
+                                        rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("getConsent"), retryDg.droidguard_token!!, ttl, iidToken)
                                         Log.i(TAG, "  ARfb cached from retry! ${retryDg.droidguard_token!!.length} chars")
                                     } else {
                                         Log.w(TAG, "  No ARfb in retry response - Sync will use raw DG token")
@@ -1831,7 +1556,7 @@ class GoogleConstellationClient(private val context: Context) {
                         }
                         // Clear DroidGuard cache on auth errors (GMS bewt.java:180-191)
                         if (e.grpcStatus.code == 7 || e.grpcStatus.code == 16) {
-                            clearDroidGuardTokenCache(resolveDroidGuardFlow("getConsent"), "Auth error (grpc-status=${e.grpcStatus.code})")
+                            rpc.clearDroidGuardTokenCache(rpc.resolveDroidGuardFlow("getConsent"), "Auth error (grpc-status=${e.grpcStatus.code})")
                         }
                     } else {
                         Log.e(TAG, "GetConsent failed: ${e.javaClass.simpleName}: ${e.message}")
@@ -1864,7 +1589,7 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.d(TAG, "SyncRequest size: ${requestByteArray.size} bytes")
 
                     try {
-                        syncRetryResponse = client.Sync().execute(currentSyncRequest)
+                        syncRetryResponse = rpc.sync(currentSyncRequest)
                         Log.i(TAG, "Sync SUCCESS on attempt $syncAttempt/$MAX_SYNC_ATTEMPTS")
                         break
                     } catch (retryEx: Exception) {
@@ -1881,13 +1606,13 @@ class GoogleConstellationClient(private val context: Context) {
                             }
                             Log.w(TAG, "Sync PERMISSION_DENIED (attempt $syncAttempt/$MAX_SYNC_ATTEMPTS), retrying with fresh DG in ${SYNC_RETRY_DELAY_MS / 1000}s...")
                             // Clear DG cache + key ack before retry
-                            clearDroidGuardTokenCache(resolveDroidGuardFlow("sync"), "Sync PERMISSION_DENIED retry $syncAttempt")
+                            rpc.clearDroidGuardTokenCache(rpc.resolveDroidGuardFlow("sync"), "Sync PERMISSION_DENIED retry $syncAttempt")
                             keyPrefs.edit().putBoolean("is_public_key_acked", false).apply()
 
                             Thread.sleep(SYNC_RETRY_DELAY_MS)
 
                             // Refresh DG token for next attempt
-                            val freshSyncToken = getDroidGuardToken("sync")
+                            val freshSyncToken = rpc.getDroidGuardToken("sync", iidToken)
                             if (freshSyncToken == null) {
                                 Log.e(TAG, "Failed to get fresh DroidGuard token for Sync retry")
                                 throw retryEx
@@ -1953,7 +1678,7 @@ class GoogleConstellationClient(private val context: Context) {
                     val serverTtl = syncDgTokenResponse.droidguard_token_ttl
                     if (!serverToken.isNullOrEmpty()) {
                         val ttlMillis = serverTtl?.toEpochMilli() ?: 0L
-                        cacheDroidGuardToken(resolveDroidGuardFlow("sync"), serverToken, ttlMillis, iidToken)
+                        rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("sync"), serverToken, ttlMillis, iidToken)
                         Log.i(TAG, "Cached DroidGuard token from SyncResponse (${serverToken.length} chars, TTL: ${java.util.Date(ttlMillis)})")
                     }
                 }
@@ -2025,8 +1750,7 @@ class GoogleConstellationClient(private val context: Context) {
                         )
 
                         // Create PhoneNumber client (separate service from PhoneDeviceVerification)
-                        val phoneNumberClient = GrpcPhoneNumberClient(grpcClient)
-                        val tokensResponse = phoneNumberClient.GetVerifiedPhoneNumbers().execute(getTokensRequest)
+                        val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
                         Log.i(TAG, "GetVerifiedPhoneNumbers response: ${tokensResponse.verified_phone_numbers.size} numbers")
 
                         val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
@@ -2060,8 +1784,7 @@ class GoogleConstellationClient(private val context: Context) {
                             ),
                             droidguard_result = ""
                         )
-                        val phoneNumberClient = GrpcPhoneNumberClient(grpcClient)
-                        val tokensResponse = phoneNumberClient.GetVerifiedPhoneNumbers().execute(getTokensRequest)
+                        val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
                         val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
                         if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
                             val jwt = firstNumber.token
@@ -2247,7 +1970,7 @@ class GoogleConstellationClient(private val context: Context) {
                         }
 
                         // Build and execute Proceed RPC (no-DG-first)
-                        val proceedDgToken = getDroidGuardToken("proceed")
+                        val proceedDgToken = rpc.getDroidGuardToken("proceed", iidToken)
                         val proceedClientInfo = buildClientInfo(
                             ctx = protoCtx,
                             droidGuardToken = proceedDgToken
@@ -2273,13 +1996,13 @@ class GoogleConstellationClient(private val context: Context) {
                             )
                         )
                         try {
-                            proceedResponse = client.Proceed().execute(noDgRequest)
+                            proceedResponse = rpc.proceed(noDgRequest)
                             Log.i(TAG, "Round $round: Proceed SUCCESS (no-DG)")
                         } catch (e: Exception) {
                             if (e is com.squareup.wire.GrpcException && proceedDgToken != null) {
                                 Log.w(TAG, "Round $round: Proceed no-DG failed (${e.grpcStatus.name}), retrying with DG")
                                 try {
-                                    proceedResponse = client.Proceed().execute(proceedRequest)
+                                    proceedResponse = rpc.proceed(proceedRequest)
                                     Log.i(TAG, "Round $round: Proceed SUCCESS (with DG)")
                                 } catch (e2: Exception) {
                                     Log.e(TAG, "Round $round: Proceed with DG also failed: ${e2.message}")
@@ -2294,7 +2017,7 @@ class GoogleConstellationClient(private val context: Context) {
                         // Cache DG token from response
                         proceedResponse?.droidguard_token_response?.let { dgResp ->
                             if (!dgResp.droidguard_token.isNullOrEmpty()) {
-                                cacheDroidGuardToken(resolveDroidGuardFlow("proceed"), dgResp.droidguard_token, dgResp.droidguard_token_ttl?.toEpochMilli() ?: 0L, iidToken)
+                                rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("proceed"), dgResp.droidguard_token, dgResp.droidguard_token_ttl?.toEpochMilli() ?: 0L, iidToken)
                             }
                         }
 
@@ -2316,8 +2039,7 @@ class GoogleConstellationClient(private val context: Context) {
                                 ),
                                 droidguard_result = ""
                             )
-                            val phoneNumberClient = GrpcPhoneNumberClient(grpcClient)
-                            val tokensResponse = phoneNumberClient.GetVerifiedPhoneNumbers().execute(getTokensRequest)
+                            val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
                             val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
                             if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
                                 logJwtSummary("GPNV_POST_PROCEED", firstNumber.token, firstNumber.phone_number)
@@ -2363,7 +2085,7 @@ class GoogleConstellationClient(private val context: Context) {
                         }
                         // Clear DroidGuard cache on auth errors (GMS bewt.java:180-191)
                         if (e.grpcStatus.code == 7 || e.grpcStatus.code == 16) {
-                            clearDroidGuardTokenCache(resolveDroidGuardFlow("sync"), "Sync auth error (grpc-status=${e.grpcStatus.code})")
+                            rpc.clearDroidGuardTokenCache(rpc.resolveDroidGuardFlow("sync"), "Sync auth error (grpc-status=${e.grpcStatus.code})")
                             keyPrefs.edit().putBoolean("is_public_key_acked", false).apply()
                             Log.w(TAG, "Cleared is_public_key_acked due to grpc-status=${e.grpcStatus.code}")
                         }
@@ -2391,7 +2113,6 @@ class GoogleConstellationClient(private val context: Context) {
                     // ============================================================
                     Log.i(TAG, "GPNV_FALLBACK: START - GetConsent/Sync failed, checking for cached verification")
                     try {
-                        val fallbackPhoneNumberClient = GrpcPhoneNumberClient(grpcClient)
                         val fallbackRequest = GetVerifiedPhoneNumbersRequest(
                             session_id = sessionId,
                             client_credentials = createIidTokenAuth(readOnlyIidToken),
@@ -2408,7 +2129,7 @@ class GoogleConstellationClient(private val context: Context) {
                         )
 
                         Log.i(TAG, "GPNV_FALLBACK: Calling GetVerifiedPhoneNumbers after verification state: sync-failed")
-                        val fallbackResponse = fallbackPhoneNumberClient.GetVerifiedPhoneNumbers().execute(fallbackRequest)
+                        val fallbackResponse = rpc.getVerifiedPhoneNumbers(fallbackRequest)
                         Log.i(TAG, "GPNV_FALLBACK: returned ${fallbackResponse.verified_phone_numbers.size} verified numbers")
 
                         val firstNumber = findMatchingVerifiedNumber(fallbackResponse.verified_phone_numbers, phoneNumber)
@@ -2445,9 +2166,8 @@ class GoogleConstellationClient(private val context: Context) {
                 } finally {
                     // S210: Dispose SMS receivers (pre-registered before Sync)
                     SmsInbox.dispose(context)
-                    // S163: Close reused DG handle at end of session
-                    try { dgHandle?.close() } catch (_: Exception) {}
-                    dgHandle = null
+                    // Close RPC client (closes DG handle + gRPC resources)
+                    rpcClient?.close()
                 }
             }
         } catch (e: Exception) {
