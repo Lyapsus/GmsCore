@@ -128,40 +128,6 @@ public class AccountAuthenticator extends AbstractAccountAuthenticator {
         } else {
             authManager = new AuthManager(context, account.name, app, authTokenType);
         }
-
-        // DEBUG: Log all incoming token requests
-        Log.d(TAG, "=== TOKEN REQUEST ===");
-        Log.d(TAG, "  Account: " + account.name);
-        Log.d(TAG, "  App: " + app);
-        Log.d(TAG, "  Auth type: " + authTokenType);
-        Log.d(TAG, "  Options: " + options);
-
-        // CRITICAL FIX (Session 89, Feb 14 2026):
-        // Stock GMS returns cached tokens from AccountManager WITHOUT permission checks
-        // or server requests. This enables seamless GMS swap - stock GMS tokens can be
-        // reused by microG without triggering BadAuthentication errors.
-        //
-        // Original code went straight to requestAuthWithBackgroundResolution() which:
-        //   1. Checks isPermitted() - may fail for apps not yet granted in microG
-        //   2. Makes server request with microG's OAuth client credentials
-        //   3. Google rejects (tokens were created by stock GMS with different client)
-        //   4. Results in BadAuthentication → "Account action required" notification
-        //
-        // By checking cache FIRST (before permission/server checks), we match stock GMS
-        // behavior: if a token exists in AccountManager, return it regardless of who
-        // created it or whether the app has explicit permission.
-        String cachedToken = authManager.getAuthToken();
-        if (cachedToken != null) {
-            Log.d(TAG, "getAuthToken: Returning cached token without server request (length=" + cachedToken.length() + ")");
-            Bundle result = new Bundle();
-            result.putString(KEY_ACCOUNT_TYPE, account.type);
-            result.putString(KEY_ACCOUNT_NAME, account.name);
-            result.putString(KEY_AUTHTOKEN, cachedToken);
-            return result;
-        }
-
-        // No cached token - proceed with server request
-        Log.d(TAG, "getAuthToken: No cached token, requesting from server");
         try {
             AuthResponse res = authManager.requestAuthWithBackgroundResolution(true);
             if (res.auth != null) {
