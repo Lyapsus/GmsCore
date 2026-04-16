@@ -404,18 +404,6 @@ class GoogleConstellationClient(private val context: Context) {
         return gaiaIds
     }
 
-    private fun bundleToParams(bundle: Bundle?): List<Param> {
-        if (bundle == null || bundle.isEmpty) {
-            return emptyList()
-        }
-        val params = ArrayList<Param>(bundle.size())
-        for (key in bundle.keySet()) {
-            val value = bundle.getString(key) ?: continue
-            params.add(Param(name = key, value_ = value))
-        }
-        return params
-    }
-
     fun verifyPhoneNumber(request: AidlVerifyPhoneNumberRequest?, callingPackage: String?, imsiOverride: String?, msisdnOverride: String?): Ts43Client.EntitlementResult {
         val requestedNumber = request?.policyId ?: msisdnOverride
         Log.i(TAG, "========================================")
@@ -984,240 +972,24 @@ class GoogleConstellationClient(private val context: Context) {
                     }
                 }
 
-                // 6. Get CountryInfo from TelephonyManager (verified in GMS bbah.java:841, bbtm.java:116,140)
-                val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-                val simCountry = telephonyManager?.simCountryIso?.lowercase(Locale.ROOT) ?: ""
-                val networkCountry = telephonyManager?.networkCountryIso?.lowercase(Locale.ROOT) ?: ""
-                Log.d(TAG, "CountryInfo: simCountry=$simCountry, networkCountry=$networkCountry")
-
-                val countryInfo = CountryInfo(
-                    sim_countries = if (simCountry.isNotEmpty()) listOf(simCountry) else emptyList(),
-                    network_countries = if (networkCountry.isNotEmpty()) listOf(networkCountry) else emptyList()
-                )
-
-                // 7. Get ConnectivityInfo from ConnectivityManager (verified in GMS bbah.java:1024-1104)
-                val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                val connectivityInfos = mutableListOf<ConnectivityInfo>()
-                val connectivityInfosJson = JSONArray()
-
-                try {
-                    @Suppress("DEPRECATION")
-                    val allNetworks = connectivityManager?.allNetworkInfo
-                    allNetworks?.forEach { networkInfo ->
-                        val type = networkInfo.type
-                        // Only include WIFI (1) and MOBILE (0) like GMS does
-                        if (type == ConnectivityManager.TYPE_WIFI || type == ConnectivityManager.TYPE_MOBILE) {
-                            val connType = when (type) {
-                                ConnectivityManager.TYPE_WIFI -> ConnectivityType.CONNECTIVITY_TYPE_WIFI
-                                ConnectivityManager.TYPE_MOBILE -> ConnectivityType.CONNECTIVITY_TYPE_MOBILE
-                                else -> ConnectivityType.CONNECTIVITY_TYPE_UNKNOWN
-                            }
-                            val connState = when (networkInfo.state) {
-                                NetworkInfo.State.CONNECTED -> ConnectivityState.CONNECTIVITY_STATE_CONNECTED
-                                NetworkInfo.State.CONNECTING -> ConnectivityState.CONNECTIVITY_STATE_CONNECTING
-                                NetworkInfo.State.DISCONNECTED -> ConnectivityState.CONNECTIVITY_STATE_DISCONNECTED
-                                NetworkInfo.State.DISCONNECTING -> ConnectivityState.CONNECTIVITY_STATE_DISCONNECTING
-                                NetworkInfo.State.SUSPENDED -> ConnectivityState.CONNECTIVITY_STATE_SUSPENDED
-                                else -> ConnectivityState.CONNECTIVITY_STATE_UNKNOWN
-                            }
-                            val connAvail = if (networkInfo.isAvailable) {
-                                ConnectivityAvailability.CONNECTIVITY_AVAILABLE
-                            } else {
-                                ConnectivityAvailability.CONNECTIVITY_NOT_AVAILABLE
-                            }
-                            connectivityInfos.add(ConnectivityInfo(
-                                type = connType,
-                                state = connState,
-                                availability = connAvail
-                            ))
-                            connectivityInfosJson.put(
-                                JSONObject()
-                                    .put("type", connType.name)
-                                    .put("state", connState.name)
-                                    .put("availability", connAvail.name)
-                                    .put("raw_type", type)
-                                    .put("raw_state", networkInfo.state.toString())
-                                    .put("is_available", networkInfo.isAvailable)
-                            )
-                        }
-                    }
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "Could not get connectivity info", e)
-                }
-                Log.d(TAG, "ConnectivityInfos: ${connectivityInfos.size} networks")
-
-                // 8. Build TelephonyInfo (REQUIRED for SIM verifications per proto)
-                // CRITICAL FIX (Session 65): TelephonyInfo structure was completely wrong!
-                // Field 1: int32 phone_type (enum)
-                // Field 2: string group_id_level1
-                val subscriptionManager = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
-                // CRITICAL FIX (S179): Match subscription to IMSI from request, not just firstOrNull()
-                // On dual-SIM, firstOrNull() picks slot 0 (wrong SIM). Must match by IMSI/MSISDN.
+                // 6-8. Gather telephony data and build proto objects
                 val targetImsi = request?.imsiRequests?.firstOrNull()?.imsi
                 val targetMsisdn = request?.imsiRequests?.firstOrNull()?.msisdn
-                val allSubs = subscriptionManager?.activeSubscriptionInfoList ?: emptyList()
-                val subscriptionInfo = if (targetImsi != null && allSubs.size > 1) {
-                    // Try matching by IMSI prefix (MCC+MNC from subscription)
-                    allSubs.find { sub ->
-                        val subMccMnc = "${sub.mcc}${String.format("%02d", sub.mnc)}"
-                        targetImsi.startsWith(subMccMnc)
-                    } ?: allSubs.find { sub ->
-                        // Fallback: match by phone number
-                        targetMsisdn != null && sub.number != null && sub.number.isNotEmpty() &&
-                            (targetMsisdn.endsWith(sub.number.takeLast(8)) || sub.number.endsWith(targetMsisdn.takeLast(8)))
-                    } ?: allSubs.firstOrNull().also {
-                        Log.w(TAG, "Could not match IMSI $targetImsi to any subscription, using first")
-                    }
-                } else {
-                    allSubs.firstOrNull()
-                }
-                Log.d(TAG, "Subscription match: target IMSI=${targetImsi?.take(5)}***, matched subId=${subscriptionInfo?.subscriptionId}, slot=${subscriptionInfo?.simSlotIndex}, mcc=${subscriptionInfo?.mcc}, mnc=${subscriptionInfo?.mnc}")
-                val subId = subscriptionInfo?.subscriptionId ?: SubscriptionManager.INVALID_SUBSCRIPTION_ID
-                val telephonyManagerSub = if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
-                    try {
-                        telephonyManager?.createForSubscriptionId(subId) ?: telephonyManager
-                    } catch (e: Exception) {
-                        telephonyManager
-                    }
-                } else {
-                    telephonyManager
-                }
-                val simOperatorStr = telephonyManagerSub?.simOperator ?: ""
-                val networkOperatorStr = telephonyManagerSub?.networkOperator ?: ""
-                val groupIdLevel1 = try {
-                    telephonyManagerSub?.groupIdLevel1 ?: ""
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "No permission for GroupIdLevel1")
-                    ""
-                }
+                val td = gatherTelephonyData(context, targetImsi, targetMsisdn)
+                val subscriptionInfo = td.subscriptionInfo
+                val telephonyManagerSub = td.telephonyManagerSub
+                val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+                val subId = td.subId
+                val simCountry = td.simCountry
+                val networkCountry = td.networkCountry
+                val iccId = td.iccId
+                val simSlotIndex = td.simSlotIndex
+                Log.d(TAG, "CountryInfo: simCountry=$simCountry, networkCountry=$networkCountry")
 
-                // Get IMEI (requires permission)
-                val imei = try {
-                    @Suppress("DEPRECATION")
-                    telephonyManagerSub?.deviceId ?: ""
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "No permission for IMEI")
-                    ""
-                }
-
-                // Get ICCID (SIM serial number, requires permission)
-                val iccId = try {
-                    subscriptionInfo?.iccId
-                        ?: run {
-                            @Suppress("DEPRECATION")
-                            telephonyManagerSub?.simSerialNumber
-                        }
-                        ?: ""
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "No permission for ICCID")
-                    ""
-                }
-
-                // TelephonyInfo - verified against v26 bfqi.java:d() (S210)
-                val phoneTypeInt = when (telephonyManagerSub?.phoneType) {
-                    TelephonyManager.PHONE_TYPE_GSM -> 1
-                    TelephonyManager.PHONE_TYPE_CDMA -> 2
-                    TelephonyManager.PHONE_TYPE_SIP -> 3
-                    else -> 0
-                }
-
-                val dataRoamingInt = if (telephonyManagerSub?.isNetworkRoaming == true) 2 else 1
-
-                val activeNetworkInfo = connectivityManager?.activeNetworkInfo
-                val networkRoamingInt = when {
-                    activeNetworkInfo == null -> 0
-                    activeNetworkInfo.isRoaming -> 2
-                    else -> 1
-                }
-
-                val hasReadSms = context.checkSelfPermission(android.Manifest.permission.READ_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                val hasSendSms = context.checkSelfPermission(android.Manifest.permission.SEND_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                val smsCapabilityInt = if (!hasReadSms || !hasSendSms) {
-                    3 // DEFAULT_CAPABILITY (no SMS perms, GMS: i2=5, 5-2=3)
-                } else {
-                    val userManager = context.getSystemService(Context.USER_SERVICE) as? android.os.UserManager
-                    val userRestricted = userManager?.userRestrictions?.getBoolean("no_sms") == true
-                    val isSmsCapable = telephonyManagerSub?.isSmsCapable == true
-                    if (userRestricted) 4 else if (!isSmsCapable) 1 else 2
-                }
-
-                val activeSubCount = subscriptionManager?.activeSubscriptionInfoCount ?: 1
-
-                val maxSubCount = subscriptionManager?.activeSubscriptionInfoCountMax ?: 1
-
-                val simSlotIndex = subscriptionInfo?.simSlotIndex ?: 0
-
-                val hasPrivilegedPhoneState = context.checkSelfPermission("android.permission.READ_PRIVILEGED_PHONE_STATE") == android.content.pm.PackageManager.PERMISSION_GRANTED
-                val hasCarrierIdCapability = if (!hasPrivilegedPhoneState || telephonyManagerSub == null) {
-                    false
-                } else {
-                    try {
-                        telephonyManagerSub.javaClass.getMethod("getIccAuthentication", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, String::class.java)
-                        true
-                    } catch (e: Exception) {
-                        try {
-                            telephonyManagerSub.javaClass.getMethod("getIccSimChallengeResponse", Int::class.javaPrimitiveType, String::class.java)
-                            true
-                        } catch (e2: Exception) {
-                            false
-                        }
-                    }
-                }
-                val carrierIdCapabilityInt = if (hasCarrierIdCapability) 2 else 1
-
-                val smsNoConfirmGranted = context.checkSelfPermission("android.permission.SEND_SMS_NO_CONFIRMATION") == android.content.pm.PackageManager.PERMISSION_GRANTED
-                val smsNoConfirmInt = if (smsNoConfirmGranted) 2 else 1
-
-                val simStateEnum = if (telephonyManagerSub?.simState == TelephonyManager.SIM_STATE_READY) 2 else 1
-
-                val serviceStateEnum = try {
-                    when (telephonyManagerSub?.serviceState?.state) {
-                        ServiceState.STATE_IN_SERVICE -> 1
-                        ServiceState.STATE_OUT_OF_SERVICE -> 2
-                        ServiceState.STATE_EMERGENCY_ONLY -> 3
-                        ServiceState.STATE_POWER_OFF -> 4
-                        else -> 0
-                    }
-                } catch (e: Exception) {
-                    0
-                }
-
-                val isEmbedded = subscriptionInfo?.isEmbedded ?: false
-                val carrierId = try {
-                    telephonyManagerSub?.simCarrierId?.toLong() ?: -1L
-                } catch (e: Exception) {
-                    -1L
-                }
-
-                val telephonyInfo = TelephonyInfo(
-                    phone_type = phoneTypeInt,
-                    group_id_level1 = groupIdLevel1,
-                    sim_country = MobileOperatorCountry(
-                        country_iso = simCountry,
-                        mcc_mnc = simOperatorStr,
-                        operator_name = telephonyManager?.simOperatorName ?: "",
-                        nil_since_millis = 0
-                    ),
-                    network_country = MobileOperatorCountry(
-                        country_iso = networkCountry,
-                        mcc_mnc = networkOperatorStr,
-                        operator_name = telephonyManager?.networkOperatorName ?: "",
-                        nil_since_millis = 0
-                    ),
-                    data_roaming = dataRoamingInt,
-                    network_roaming = networkRoamingInt,
-                    sms_capability = smsCapabilityInt,
-                    subscription_count = activeSubCount,
-                    subscription_count_max = maxSubCount,
-                    eap_aka_capability = carrierIdCapabilityInt,
-                    sms_no_confirm_capability = smsNoConfirmInt,
-                    sim_state = simStateEnum,
-                    imei = imei.takeIf { it.isNotEmpty() },
-                    service_state = serviceStateEnum,
-                    is_embedded = isEmbedded,
-                    sim_carrier_id = carrierId
-                )
-                Log.d(TAG, "TelephonyInfo: phoneType=$phoneTypeInt, gid1=$groupIdLevel1, simState=$simStateEnum, serviceState=$serviceStateEnum, subs=$activeSubCount/$maxSubCount")
+                val countryInfo = buildCountryInfo(td)
+                val connectivityInfos = gatherConnectivityInfos(context)
+                val telephonyInfo = buildTelephonyInfo(td)
+                Log.d(TAG, "TelephonyInfo: phoneType=${td.phoneTypeInt}, gid1=${td.groupIdLevel1}, simState=${td.simStateEnum}, serviceState=${td.serviceStateEnum}, subs=${td.activeSubCount}/${td.maxSubCount}")
 
                 // 9. Build Sync Request with ALL required fields
                 val sessionId = UUID.randomUUID().toString()
@@ -1244,25 +1016,9 @@ class GoogleConstellationClient(private val context: Context) {
                 // SIMAssociation.identifiers (field 2) uses repeated StringId
                 val simAssociationIdentifiers = registeredAppIds
 
-                // CRITICAL FIX 2026-02-01: Build TelephonyInfoContainer (field 20)
-                // GMS sends this with Gaia IDs - NOT iccid as previously assumed!
+                // Build TelephonyInfoContainer (field 20 of ClientInfo) from Gaia IDs
                 val gaiaIdsList = getGaiaIds()
-                val nowMillis = System.currentTimeMillis()
-                val telephonyInfoContainer = if (gaiaIdsList.isNotEmpty()) {
-                    val entries = gaiaIdsList.map { gaiaId ->
-                        TelephonyInfoEntry(
-                            gaia_id = gaiaId,
-                            state = 1,  // State=1 in all captured GMS traffic
-                            timestamp = Timestamp(
-                                seconds = nowMillis / 1000,
-                                nanos = ((nowMillis % 1000) * 1_000_000).toInt()
-                            )
-                        )
-                    }
-                    TelephonyInfoContainer(entries = entries)
-                } else {
-                    null
-                }
+                val telephonyInfoContainer = buildTelephonyInfoContainer(gaiaIdsList)
                 Log.d(TAG, "TelephonyInfoContainer: ${gaiaIdsList.size} Gaia IDs")
 
                 val requestImsi = request?.imsiRequests?.firstOrNull()?.imsi
@@ -1443,19 +1199,13 @@ class GoogleConstellationClient(private val context: Context) {
                 Log.i(TAG, "IdTokenRequest: certificate_hash_len=${idTokenCertificateHash.length}, calling_package=$idTokenCallingPackage, token_nonce_len=${idTokenNonce.length}, source=${if (request?.idTokenRequest != null) "aidl" else if (audienceOverride.isNotEmpty()) "override" else "empty"}")
 
                 // S164: Stock GMS (bevm.java:1170-1253) populates ALL 5 CarrierInfo fields
-                // and puts it in Verification.carrier_info (field 8). This tells the server
-                // the carrier policy (upi_policy_id), which is critical for NONE→PENDING transition.
-                val carrierInfo = CarrierInfo(
-                    phone_number = phoneNumber,  // = upi_policy_id from Messages (e.g., "upi-carrier-id-mt-non-priority")
-                    subscription_id = request?.timeout ?: 0L,
-                    id_token_request = if (idTokenCertificateHash.isNotEmpty() || idTokenNonce.isNotEmpty()) {
-                        IdTokenRequest(
-                            certificate_hash = idTokenCertificateHash,
-                            token_nonce = idTokenNonce
-                        )
-                    } else null,
-                    calling_package = idTokenCallingPackage,
-                    imsi_requests = imsiRequests
+                val carrierInfo = buildCarrierInfo(
+                    phoneNumber = phoneNumber,
+                    subscriptionId = request?.timeout ?: 0L,
+                    idTokenCertificateHash = idTokenCertificateHash,
+                    idTokenNonce = idTokenNonce,
+                    callingPackage = idTokenCallingPackage,
+                    imsiRequests = imsiRequests
                 )
                 Log.d(TAG, "CarrierInfo: phone_number=$phoneNumber, sub_id=${request?.timeout}, calling_package=$idTokenCallingPackage, imsi_requests=${imsiRequests.size}")
 
@@ -1510,6 +1260,21 @@ class GoogleConstellationClient(private val context: Context) {
                 }
 
                 Log.d(TAG, "Android IDs: device=$deviceAndroidId, deviceUser=$deviceUserId, userAndroid=$userAndroidId (settings=${androidIdFromSettings})")
+
+                // Common proto context shared across all request builders in this call
+                val protoCtx = RequestProtoContext(
+                    iidToken = iidToken,
+                    deviceAndroidId = deviceAndroidId,
+                    userAndroidId = userAndroidId,
+                    publicKeyBytes = publicKeyBytes,
+                    localeStr = localeStr,
+                    gmscoreVersionNumber = GMSCORE_VERSION_NUMBER,
+                    gmscoreVersion = GMSCORE_VERSION,
+                    registeredAppIds = registeredAppIds,
+                    countryInfo = countryInfo,
+                    connectivityInfos = connectivityInfos,
+                    telephonyInfoContainer = telephonyInfoContainer
+                )
 
                 fun buildSnapshot(
                     phase: String,
@@ -1623,33 +1388,40 @@ class GoogleConstellationClient(private val context: Context) {
                         .put("network_countries", JSONArray().put(networkCountry))
                     snapshot.put("country_info", countryJson)
 
-                    snapshot.put("connectivity_infos", connectivityInfosJson)
+                    snapshot.put("connectivity_infos", JSONArray().also { arr ->
+                        connectivityInfos.forEach { ci ->
+                            arr.put(JSONObject()
+                                .put("type", ci.type?.name ?: "")
+                                .put("state", ci.state?.name ?: "")
+                                .put("availability", ci.availability?.name ?: ""))
+                        }
+                    })
 
                     val telephonyJson = JSONObject()
-                        .put("phone_type", phoneTypeInt)
-                        .put("group_id_level1", groupIdLevel1)
+                        .put("phone_type", td.phoneTypeInt)
+                        .put("group_id_level1", td.groupIdLevel1)
                         .put("sim_country", JSONObject()
-                            .put("country_iso", simCountry)
-                            .put("mcc_mnc", simOperatorStr)
-                            .put("operator_name", telephonyManager?.simOperatorName ?: "")
+                            .put("country_iso", td.simCountry)
+                            .put("mcc_mnc", td.simOperator)
+                            .put("operator_name", td.simOperatorName)
                             .put("nil_since_millis", 0))
                         .put("network_country", JSONObject()
-                            .put("country_iso", networkCountry)
-                            .put("mcc_mnc", networkOperatorStr)
-                            .put("operator_name", telephonyManager?.networkOperatorName ?: "")
+                            .put("country_iso", td.networkCountry)
+                            .put("mcc_mnc", td.networkOperator)
+                            .put("operator_name", td.networkOperatorName)
                             .put("nil_since_millis", 0))
-                        .put("data_roaming", dataRoamingInt)
-                        .put("network_roaming", networkRoamingInt)
-                        .put("sms_capability", smsCapabilityInt)
-                        .put("subscription_count", activeSubCount)
-                        .put("subscription_count_max", maxSubCount)
-                        .put("eap_aka_capability", carrierIdCapabilityInt)
-                        .put("sms_no_confirm_capability", smsNoConfirmInt)
-                        .put("sim_state", simStateEnum)
-                        .put("imei", imei)
-                        .put("service_state", serviceStateEnum)
-                        .put("is_embedded", isEmbedded)
-                        .put("carrier_id", carrierId)
+                        .put("data_roaming", td.dataRoamingInt)
+                        .put("network_roaming", td.networkRoamingInt)
+                        .put("sms_capability", td.smsCapabilityInt)
+                        .put("subscription_count", td.activeSubCount)
+                        .put("subscription_count_max", td.maxSubCount)
+                        .put("eap_aka_capability", td.carrierIdCapabilityInt)
+                        .put("sms_no_confirm_capability", td.smsNoConfirmInt)
+                        .put("sim_state", td.simStateEnum)
+                        .put("imei", td.imei)
+                        .put("service_state", td.serviceStateEnum)
+                        .put("is_embedded", td.isEmbedded)
+                        .put("carrier_id", td.carrierId)
                     snapshot.put("telephony_info", telephonyJson)
 
                     val simAssoc = JSONObject()
@@ -1793,13 +1565,7 @@ class GoogleConstellationClient(private val context: Context) {
                 }
                 Log.d(TAG, "SMS app-specific token: '${smsToken}' (${smsToken.length} chars)")
 
-                val verificationMethodInfo = VerificationMethodInfo(
-                    // Stock GMS sends EMPTY methods list (Phenotype default=0 → no method added).
-                    // Verified: bevm.java:246-261, captured hzdb_syncrequest has no field 7.1.
-                    // S108 discovery: we were sending [MT_SMS, TS43] - stock does NOT.
-                    methods = emptyList(),
-                    data_ = VerificationMethodData(value_ = smsToken)
-                )
+                val verificationMethodInfo = buildVerificationMethodInfo(smsToken)
 
                 val loadedVerificationTokens = loadVerificationTokens(keyPrefs)
 
@@ -1818,64 +1584,24 @@ class GoogleConstellationClient(private val context: Context) {
                 }
                 Log.i(TAG, "╚══ SYNC PRE-FLIGHT DONE ══╝")
 
-                val request = SyncRequest(
-                    verifications = listOf(
-                        Verification(
-                            association = VerificationAssociation(
-                                sim = SIMAssociation(
-                                    sim_info = SIMInfo(
-                                        // CRITICAL FIX (S103): listOf("") encodes as field-present-but-empty on wire,
-                                        // causing server error "imsi[0] empty". Send emptyList() when IMSI is blank.
-                                        imsi = listOf(imsi).filter { it.isNotEmpty() },
-                                        sim_readable_number = msisdn,
-                                        iccid = iccId
-                                    ),
-                                    identifiers = simAssociationIdentifiers,
-                                    sim_slot = SIMSlot(
-                                        index = simSlotIndex,
-                                        sub_id = subId
-                                    )
-                                )
-                            ),
-                            state = VerificationState.VERIFICATION_STATE_NONE,
-                            telephony_info = telephonyInfo,
-                            params = params,
-                            verification_method_info = verificationMethodInfo,
-                            carrier_info = carrierInfo
-                        )
-                    ),
-                    header_ = RequestHeader(
-                        session_id = sessionId,
-                        client_credentials = syncClientCredentials,
-                        client_info = ClientInfo(
-                            device_id = syncDeviceId,
-                            client_public_key = publicKeyBytes,
-                            locale = localeStr,
-                            gmscore_version_number = GMSCORE_VERSION_NUMBER,
-                            gmscore_version = GMSCORE_VERSION,
-                            android_sdk_version = Build.VERSION.SDK_INT,
-                            device_signals = if (syncToken != null) DeviceSignals(droidguard_token = syncToken) else DeviceSignals(),
-                            // NOTE: Do NOT set gaia_ids here - stock GMS never populates
-                            // ClientInfo.field_9 in SyncRequest (verified via protoc --decode_raw
-                            // comparison, 2026-02-16). Only field_12 (registered_app_ids) is used.
-                            has_read_privileged_phone_state_permission = 1,
-                            registered_app_ids = registeredAppIds,
-                            country_info = countryInfo,
-                            connectivity_infos = connectivityInfos,
-                            is_standalone_device = false,
-                            telephony_info_container = telephonyInfoContainer,
-                            model = Build.MODEL,
-                            manufacturer = Build.MANUFACTURER,
-                            device_fingerprint = Build.FINGERPRINT,
-                            // Stock GMS capture: ClientInfo.field_18 = 1 (PHONE)
-                            device_type = DeviceType.DEVICE_TYPE_PHONE,
-                            experiment_infos = emptyList()
-                        ),
-                        trigger = RequestTrigger(
-                            type = TriggerType.TRIGGER_TYPE_TRIGGER_API_CALL
-                        )
-                    ),
-                    verification_tokens = loadedVerificationTokens
+                val simInfo = buildSIMInfo(imsi, msisdn, iccId)
+                val verification = buildVerification(
+                    simInfo = simInfo,
+                    simAssociationIdentifiers = simAssociationIdentifiers,
+                    simSlotIndex = simSlotIndex,
+                    subId = subId,
+                    telephonyInfo = telephonyInfo,
+                    params = params,
+                    verificationMethodInfo = verificationMethodInfo,
+                    carrierInfo = carrierInfo
+                )
+                val request = buildSyncRequest(
+                    sessionId = sessionId,
+                    ctx = protoCtx,
+                    syncToken = syncToken,
+                    syncClientCredentials = syncClientCredentials,
+                    verification = verification,
+                    verificationTokens = loadedVerificationTokens
                 )
 
                 logSnapshot(
@@ -1903,52 +1629,12 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.w(TAG, "DroidGuard token for GetConsent FAILED - proceeding WITHOUT DG (no-DG-first strategy, S163 proved this works)")
                 }
 
-                val consentRequest = google.internal.communications.phonedeviceverification.v1.GetConsentRequest(
-                    // CRITICAL: GMS sets DeviceId at TOP LEVEL (field 1) even though proto says DEPRECATED
-                    // bekg.java:492-509: ONLY sets iid_token (hvzgVar.b = str), omits android_id fields!
-                    device_id = DeviceId(
-                        iid_token = iidToken
-                        // device_android_id: OMIT - GMS doesn't set (proto default omission)
-                        // device_user_id: OMIT - GMS doesn't set
-                        // user_android_id: OMIT - GMS doesn't set
-                    ),
-                    // Field 2: repeated StringId (OAuth tokens)
-                    gaia_ids = registeredAppIds,
-                    header_ = RequestHeader(
-                        session_id = sessionId,
-                        client_info = ClientInfo(
-                            device_id = DeviceId(
-                                iid_token = iidToken,
-                                device_android_id = deviceAndroidId,  // SharedPrefs primary_device_id
-                                user_android_id = userAndroidId  // Settings.Secure ANDROID_ID
-                            ),
-                            client_public_key = publicKeyBytes,
-                            locale = localeStr,
-                            gmscore_version_number = GMSCORE_VERSION_NUMBER,
-                            gmscore_version = GMSCORE_VERSION,
-                            android_sdk_version = Build.VERSION.SDK_INT,
-                            device_signals = if (getConsentToken != null) DeviceSignals(droidguard_token = getConsentToken) else DeviceSignals(),
-                            model = Build.MODEL,
-                            manufacturer = Build.MANUFACTURER,
-                            device_fingerprint = Build.FINGERPRINT,
-                            device_type = DeviceType.DEVICE_TYPE_PHONE,
-                            has_read_privileged_phone_state_permission = 1,
-                            registered_app_ids = registeredAppIds,
-                            country_info = countryInfo,
-                            connectivity_infos = connectivityInfos,
-                            is_standalone_device = false,
-                            // CRITICAL FIX 2026-02-01: Field 20 IS sent by GMS
-                            telephony_info_container = telephonyInfoContainer
-                        ),
-                        trigger = RequestTrigger(type = TriggerType.TRIGGER_TYPE_TRIGGER_API_CALL)
-                    ),
-                    // Field 5: same merged params as Sync (stock GMS uses same bundle for both)
-                    api_params = params,
-                    // Field 6: enum (typically UNKNOWN=0 which is omitted on wire)
-                    include_asterism_consents = AsterismClient.ASTERISM_CLIENT_UNKNOWN,
-                    // Field 8: bool, always true in GMS
-                    asterism_client_bool = true,
-                    imei = null
+                val consentRequest = buildGetConsentRequest(
+                    sessionId = sessionId,
+                    ctx = protoCtx,
+                    getConsentToken = getConsentToken,
+                    registeredAppIds = registeredAppIds,
+                    params = params
                 )
 
                 logSnapshot(
@@ -2059,53 +1745,12 @@ class GoogleConstellationClient(private val context: Context) {
                         // handles DG-free SetConsent. Try without DG first; if PERMISSION_DENIED, retry with DG.
                         Log.w(TAG, "Consent NOT established (${consentResponse.device_consent?.consent}) - calling SetConsent(CONSENTED)...")
                         try {
-                            // S163: Build SetConsent request builder lambda (reused for both attempts)
-                            fun buildSetConsentRequest(dgToken: String?): SetConsentRequest {
-                                return SetConsentRequest(
-                                    header_ = RequestHeader(
-                                        session_id = sessionId,
-                                        client_info = ClientInfo(
-                                            device_id = DeviceId(
-                                                iid_token = iidToken,
-                                                device_android_id = deviceAndroidId,
-                                                user_android_id = userAndroidId
-                                            ),
-                                            client_public_key = publicKeyBytes,
-                                            locale = localeStr,
-                                            gmscore_version_number = GMSCORE_VERSION_NUMBER,
-                                            gmscore_version = GMSCORE_VERSION,
-                                            android_sdk_version = Build.VERSION.SDK_INT,
-                                            device_signals = if (dgToken != null) DeviceSignals(droidguard_token = dgToken) else null,
-                                            model = Build.MODEL,
-                                            manufacturer = Build.MANUFACTURER,
-                                            device_fingerprint = Build.FINGERPRINT,
-                                            device_type = DeviceType.DEVICE_TYPE_PHONE,
-                                            has_read_privileged_phone_state_permission = 1,
-                                            registered_app_ids = registeredAppIds,
-                                            country_info = countryInfo,
-                                            connectivity_infos = connectivityInfos,
-                                            is_standalone_device = false,
-                                            telephony_info_container = telephonyInfoContainer
-                                        ),
-                                        trigger = RequestTrigger(type = TriggerType.TRIGGER_TYPE_TRIGGER_API_CALL)
-                                    ),
-                                    // GMS bewt.y(): asterism_client = RCS (via Asterism AIDL from Messages)
-                                    asterism_client = AsterismClient.ASTERISM_CLIENT_RCS,
-                                    // GMS bewt.y(): field 10 = DeviceVerificationConsent with consent+source+version
-                                    device_verification_consent = DeviceVerificationConsent(
-                                        consent_value = ConsentValue.CONSENT_VALUE_CONSENTED,
-                                        consent_source = DeviceVerificationConsentSource.DEVICE_VERIFICATION_CONSENT_SOURCE_ANDROID_DEVICE_SETTINGS,
-                                        consent_version = DeviceVerificationConsentVersion.DEVICE_VERIFICATION_CONSENT_VERSION_PHONE_VERIFICATION_DEFAULT
-                                    )
-                                )
-                            }
-
                             // S163: Try SetConsent WITHOUT DG first (API doc says DG only required for Sync/Proceed)
                             // If PERMISSION_DENIED, retry WITH DG token
                             var setConsentSucceeded = false
                             Log.d(TAG, "SetConsent attempt 1: WITHOUT DroidGuard (API doc: DG not required for SetConsent)")
                             try {
-                                val noDgRequest = buildSetConsentRequest(null)
+                                val noDgRequest = buildSetConsentRequest(sessionId, protoCtx, null)
                                 Log.d(TAG, "SetConsent request size (no DG): ${noDgRequest.encode().size} bytes")
                                 client.SetConsent().execute(noDgRequest)
                                 Log.i(TAG, "SetConsent SUCCESS (no DG)! Server accepted consent without DroidGuard.")
@@ -2119,7 +1764,7 @@ class GoogleConstellationClient(private val context: Context) {
                                     val setConsentToken = getDroidGuardToken("setConsent")
                                     if (setConsentToken != null) {
                                         try {
-                                            val dgRequest = buildSetConsentRequest(setConsentToken)
+                                            val dgRequest = buildSetConsentRequest(sessionId, protoCtx, setConsentToken)
                                             Log.d(TAG, "SetConsent request size (with DG): ${dgRequest.encode().size} bytes")
                                             client.SetConsent().execute(dgRequest)
                                             Log.i(TAG, "SetConsent SUCCESS (with DG)!")
@@ -2144,40 +1789,12 @@ class GoogleConstellationClient(private val context: Context) {
                                 Log.d(TAG, "Retrying GetConsent to obtain ARfb token...")
                                 val retryToken = getDroidGuardToken("getConsent")
                                 if (retryToken != null) {
-                                    val retryRequest = GetConsentRequest(
-                                        device_id = DeviceId(iid_token = iidToken),
-                                        gaia_ids = registeredAppIds,
-                                        header_ = RequestHeader(
-                                            session_id = sessionId,
-                                            client_info = ClientInfo(
-                                                device_id = DeviceId(
-                                                    iid_token = iidToken,
-                                                    device_android_id = deviceAndroidId,
-                                                    user_android_id = userAndroidId
-                                                ),
-                                                client_public_key = publicKeyBytes,
-                                                locale = localeStr,
-                                                gmscore_version_number = GMSCORE_VERSION_NUMBER,
-                                                gmscore_version = GMSCORE_VERSION,
-                                                android_sdk_version = Build.VERSION.SDK_INT,
-                                                device_signals = DeviceSignals(droidguard_token = retryToken),
-                                                model = Build.MODEL,
-                                                manufacturer = Build.MANUFACTURER,
-                                                device_fingerprint = Build.FINGERPRINT,
-                                                device_type = DeviceType.DEVICE_TYPE_PHONE,
-                                                has_read_privileged_phone_state_permission = 1,
-                                                registered_app_ids = registeredAppIds,
-                                                country_info = countryInfo,
-                                                connectivity_infos = connectivityInfos,
-                                                is_standalone_device = false,
-                                                telephony_info_container = telephonyInfoContainer
-                                            ),
-                                            trigger = RequestTrigger(type = TriggerType.TRIGGER_TYPE_TRIGGER_API_CALL)
-                                        ),
-                                        api_params = params,
-                                        include_asterism_consents = AsterismClient.ASTERISM_CLIENT_UNKNOWN,
-                                        asterism_client_bool = true,
-                                        imei = null
+                                    val retryRequest = buildGetConsentRequest(
+                                        sessionId = sessionId,
+                                        ctx = protoCtx,
+                                        getConsentToken = retryToken,
+                                        registeredAppIds = registeredAppIds,
+                                        params = params
                                     )
                                     val retryResponse = client.GetConsent().execute(retryRequest)
                                     Log.i(TAG, "GetConsent retry: consent=${retryResponse.device_consent?.consent}")
@@ -2259,38 +1876,7 @@ class GoogleConstellationClient(private val context: Context) {
                             // On second PERMISSION_DENIED, retry WITH fresh DG after delay
                             if (syncAttempt == 1) {
                                 Log.w(TAG, "Sync PERMISSION_DENIED (attempt 1/$MAX_SYNC_ATTEMPTS), retrying WITHOUT DG...")
-                                val noDgClientInfo = currentSyncRequest.header_?.client_info?.let { ci ->
-                                    ClientInfo(
-                                        device_id = ci.device_id,
-                                        client_public_key = ci.client_public_key,
-                                        locale = ci.locale,
-                                        gmscore_version_number = ci.gmscore_version_number,
-                                        gmscore_version = ci.gmscore_version,
-                                        android_sdk_version = ci.android_sdk_version,
-                                        device_signals = DeviceSignals(),  // Empty - no DG
-                                        has_read_privileged_phone_state_permission = ci.has_read_privileged_phone_state_permission,
-                                        registered_app_ids = ci.registered_app_ids,
-                                        country_info = ci.country_info,
-                                        connectivity_infos = ci.connectivity_infos,
-                                        is_standalone_device = ci.is_standalone_device,
-                                        telephony_info_container = ci.telephony_info_container,
-                                        model = ci.model,
-                                        manufacturer = ci.manufacturer,
-                                        device_fingerprint = ci.device_fingerprint,
-                                        device_type = ci.device_type,
-                                        experiment_infos = ci.experiment_infos
-                                    )
-                                }
-                                currentSyncRequest = SyncRequest(
-                                    verifications = request.verifications,
-                                    header_ = RequestHeader(
-                                        client_info = noDgClientInfo,
-                                        client_credentials = request.header_?.client_credentials,
-                                        session_id = request.header_?.session_id ?: "",
-                                        trigger = request.header_?.trigger
-                                    ),
-                                    verification_tokens = request.verification_tokens
-                                )
+                                currentSyncRequest = rebuildSyncRequestWithDg(currentSyncRequest, null)
                                 continue
                             }
                             Log.w(TAG, "Sync PERMISSION_DENIED (attempt $syncAttempt/$MAX_SYNC_ATTEMPTS), retrying with fresh DG in ${SYNC_RETRY_DELAY_MS / 1000}s...")
@@ -2308,39 +1894,8 @@ class GoogleConstellationClient(private val context: Context) {
                             }
                             Log.d(TAG, "Got fresh DG token for retry (${freshSyncToken.length} chars)")
 
-                            // Rebuild request with fresh DG token via newBuilder
-                            val freshClientInfo = currentSyncRequest.header_?.client_info?.let { ci ->
-                                ClientInfo(
-                                    device_id = ci.device_id,
-                                    client_public_key = ci.client_public_key,
-                                    locale = ci.locale,
-                                    gmscore_version_number = ci.gmscore_version_number,
-                                    gmscore_version = ci.gmscore_version,
-                                    android_sdk_version = ci.android_sdk_version,
-                                    device_signals = DeviceSignals(droidguard_token = freshSyncToken),
-                                    has_read_privileged_phone_state_permission = ci.has_read_privileged_phone_state_permission,
-                                    registered_app_ids = ci.registered_app_ids,
-                                    country_info = ci.country_info,
-                                    connectivity_infos = ci.connectivity_infos,
-                                    is_standalone_device = ci.is_standalone_device,
-                                    telephony_info_container = ci.telephony_info_container,
-                                    model = ci.model,
-                                    manufacturer = ci.manufacturer,
-                                    device_fingerprint = ci.device_fingerprint,
-                                    device_type = ci.device_type,
-                                    experiment_infos = ci.experiment_infos
-                                )
-                            }
-                            currentSyncRequest = SyncRequest(
-                                verifications = request.verifications,
-                                header_ = RequestHeader(
-                                    client_info = freshClientInfo,
-                                    client_credentials = request.header_?.client_credentials,
-                                    session_id = request.header_?.session_id ?: "",
-                                    trigger = request.header_?.trigger
-                                ),
-                                verification_tokens = request.verification_tokens
-                            )
+                            // Rebuild request with fresh DG token
+                            currentSyncRequest = rebuildSyncRequestWithDg(currentSyncRequest, freshSyncToken)
                             continue
                         }
 
@@ -2693,28 +2248,14 @@ class GoogleConstellationClient(private val context: Context) {
 
                         // Build and execute Proceed RPC (no-DG-first)
                         val proceedDgToken = getDroidGuardToken("proceed")
-                        val proceedHeader = RequestHeader(
-                            session_id = sessionId,
-                            client_credentials = proceedClientCredentials,
-                            client_info = ClientInfo(
-                                device_id = proceedDeviceId,
-                                client_public_key = publicKeyBytes,
-                                locale = localeStr,
-                                gmscore_version_number = GMSCORE_VERSION_NUMBER,
-                                gmscore_version = GMSCORE_VERSION,
-                                android_sdk_version = Build.VERSION.SDK_INT,
-                                device_signals = if (proceedDgToken != null) DeviceSignals(droidguard_token = proceedDgToken) else DeviceSignals(),
-                                model = Build.MODEL,
-                                manufacturer = Build.MANUFACTURER,
-                                device_fingerprint = Build.FINGERPRINT,
-                                device_type = DeviceType.DEVICE_TYPE_PHONE,
-                                has_read_privileged_phone_state_permission = 1,
-                                registered_app_ids = registeredAppIds,
-                                country_info = countryInfo,
-                                connectivity_infos = connectivityInfos,
-                                telephony_info_container = telephonyInfoContainer
-                            ),
-                            trigger = RequestTrigger(type = TriggerType.TRIGGER_TYPE_TRIGGER_API_CALL)
+                        val proceedClientInfo = buildClientInfo(
+                            ctx = protoCtx,
+                            droidGuardToken = proceedDgToken
+                        )
+                        val proceedHeader = buildRequestHeader(
+                            sessionId = sessionId,
+                            clientInfo = proceedClientInfo,
+                            clientCredentials = proceedClientCredentials
                         )
                         val proceedRequest = google.internal.communications.phonedeviceverification.v1.ProceedRequest(
                             verification = currentVerification,
