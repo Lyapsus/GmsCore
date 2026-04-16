@@ -134,7 +134,7 @@ fun gatherTelephonyData(
     val subscriptionManager = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
     val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
-    // Match subscription to IMSI from request (S179 fix for dual-SIM)
+    // Match subscription to IMSI from request (dual-SIM)
     val allSubs = subscriptionManager?.activeSubscriptionInfoList ?: emptyList()
     val subscriptionInfo = if (targetImsi != null && allSubs.size > 1) {
         allSubs.find { sub ->
@@ -192,7 +192,7 @@ fun gatherTelephonyData(
         ""
     }
 
-    // TelephonyInfo fields - verified against v26 bfqi.java:d() (S210)
+    // TelephonyInfo fields - verified against v26 bfqi.java:d()
     val phoneTypeInt = when (telephonyManagerSub?.phoneType) {
         TelephonyManager.PHONE_TYPE_GSM -> 1
         TelephonyManager.PHONE_TYPE_CDMA -> 2
@@ -308,7 +308,7 @@ fun buildCountryInfo(td: TelephonyData): CountryInfo {
 
 /**
  * Build TelephonyInfo proto from gathered telephony data.
- * Verified against GMS v26 bfqi.java:d() (S210).
+ * Verified against GMS v26 bfqi.java:d().
  */
 fun buildTelephonyInfo(td: TelephonyData): TelephonyInfo {
     return TelephonyInfo(
@@ -364,7 +364,7 @@ fun buildTelephonyInfoContainer(gaiaIds: List<String>): TelephonyInfoContainer? 
 /**
  * Build SIMInfo for a verification's SIMAssociation.
  *
- * CRITICAL (S103): listOf("") encodes as field-present-but-empty on wire,
+ * listOf("") encodes as field-present-but-empty on wire,
  * causing server error "imsi[0] empty". Send emptyList() when IMSI is blank.
  */
 fun buildSIMInfo(
@@ -555,7 +555,7 @@ fun buildGetConsentRequest(
 
 /**
  * Build the SetConsentRequest proto.
- * S163: API doc says DG only required for Sync/Proceed, not SetConsent.
+ * API doc says DG only required for Sync/Proceed, not SetConsent.
  *
  * @param dgToken DG token string, or null for no-DG attempt
  */
@@ -585,7 +585,7 @@ fun buildSetConsentRequest(
 
 /**
  * Build a CarrierInfo for the Verification message.
- * S164: Stock GMS (bevm.java:1170-1253) populates ALL 5 CarrierInfo fields.
+ * Stock GMS (bevm.java:1170-1253) populates ALL 5 CarrierInfo fields.
  */
 fun buildCarrierInfo(
     phoneNumber: String?,

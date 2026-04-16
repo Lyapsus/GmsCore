@@ -239,36 +239,23 @@ class ConstellationRpcClient(
         val now = System.currentTimeMillis()
 
         if (cachedToken != null && cachedTtl > 0) {
-            // Check IID binding: DG tokens are session-bound via iidHash
             if (cachedIid != null && cachedIid != currentIid) {
-                Log.w(TAG, "DG token cache invalidated: IID changed from ${cachedIid.take(20)}... to ${currentIid.take(20)}...")
-                clearDroidGuardTokenCache(dgFlow, "IID token changed (iidHash won't match)")
+                Log.w(TAG, "DG cache invalidated for $rpcMethod: IID changed")
+                clearDroidGuardTokenCache(dgFlow, "IID token changed")
             } else {
                 val ttlRemaining = cachedTtl - now
-                val ttlRemainingHours = ttlRemaining / (1000 * 60 * 60)
-
                 if (ttlRemaining > 0) {
-                    Log.i(TAG, "DroidGuard cache HIT for $rpcMethod:")
-                    Log.i(TAG, "  - Cached token: ${cachedToken.length} chars, prefix=${cachedToken.take(10)}...")
-                    Log.i(TAG, "  - TTL expires: ${java.util.Date(cachedTtl)} (~${ttlRemainingHours}h remaining)")
-                    if (cachedIid != null) Log.d(TAG, "  - DG token cache valid: IID matches")
-                    Log.i(TAG, "  - Using CACHED token instead of calling DroidGuard VM")
+                    Log.d(TAG, "DG cache HIT for $rpcMethod: ${cachedToken.length} chars, TTL ~${ttlRemaining / 3600000}h")
                     return cachedToken
                 } else {
-                    Log.w(TAG, "DroidGuard cache EXPIRED for $rpcMethod:")
-                    Log.w(TAG, "  - Expired at: ${java.util.Date(cachedTtl)} (${-ttlRemainingHours}h ago)")
-                    Log.w(TAG, "  - Will generate fresh token from VM")
+                    Log.d(TAG, "DG cache EXPIRED for $rpcMethod")
                     clearDroidGuardTokenCache(dgFlow, "TTL expired")
                 }
             }
-        } else {
-            Log.d(TAG, "DroidGuard cache MISS for $rpcMethod (no cached token)")
         }
 
-        // Step 2: Generate fresh token via reused DG handle (S163: matches stock bfox pattern)
-        Log.d(TAG, "Calling DroidGuard VM for $rpcMethod...")
-        Log.d(TAG, "  - Flow: $dgFlow")
-        Log.d(TAG, "  - Bindings: iidHash=${iidHash.take(10)}..., rpc=$rpcMethod")
+        // Generate fresh token via reused DG handle (matches stock bfox pattern)
+        Log.d(TAG, "DG VM call: rpc=$rpcMethod flow=$dgFlow")
 
         val handle = openOrReuseDgHandle(dgFlow) ?: return null
         val dgBindings = mapOf(
@@ -278,25 +265,8 @@ class ConstellationRpcClient(
         return try {
             val token = handle.snapshot(dgBindings)
             if (token != null) {
-                Log.i(TAG, "DroidGuard VM returned token for $rpcMethod:")
                 Log.i("MicroGRcs", "constellation DG=${token.length}chars rpc=$rpcMethod")
-                Log.i(TAG, "  - Length: ${token.length} chars")
-                Log.i(TAG, "  - Prefix: ${token.take(20)}...")
-                val format = when {
-                    token.startsWith("CgZ") || token.startsWith("Cg") -> "RAW_PROTOBUF (from VM)"
-                    token.startsWith("ARfb") -> "PROCESSED (should be from cache!)"
-                    token.startsWith("ERROR") -> "ERROR"
-                    else -> "UNKNOWN"
-                }
-                Log.i(TAG, "  - Format: $format")
-                // DG quality gate: warn if token is suspiciously small
-                if (token.length < 30000) {
-                    Log.w(TAG, "  DG TOKEN QUALITY WARNING: ${token.length} chars < 30000")
-                    Log.w(TAG, "    Stock GMS produces ~43K. If .unstable is in Magisk denylist,")
-                    Log.w(TAG, "    CleveresTricky can't inject -> smaller tokens -> server may reject.")
-                } else {
-                    Log.i(TAG, "  DG token size OK (${token.length} chars)")
-                }
+                Log.d(TAG, "DG token for $rpcMethod: ${token.length} chars, prefix=${token.take(10)}...")
             } else {
                 Log.e(TAG, "DroidGuard VM returned NULL for $rpcMethod")
             }
