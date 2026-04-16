@@ -85,36 +85,10 @@ class DroidGuardHandleImpl(private val context: Context, private val packageName
     override fun snapshot(map: MutableMap<Any?, Any?>): ByteArray {
         Log.d(TAG, "snapshot($map)")
         condition.block()
-
-        // Include bindings hash in cache key so different content bindings get fresh tokens.
-        // DroidGuard tokens are cryptographically bound to their content bindings (e.g., rpc path).
-        // Without this, changing the rpc binding would still return old cached tokens.
-        val cacheKey = if (flow != null && map.isNotEmpty()) {
-            val hash = map.entries.sortedBy { it.key.toString() }
-                .joinToString(",") { "${it.key}=${it.value}" }.hashCode()
-            "${flow}_${hash.toUInt().toString(16)}"
-        } else {
-            flow
-        }
-        Log.d(TAG, "Cache key: '$cacheKey' (flow='$flow', bindings=${map.keys})")
-
-        // Check for cached token first (like stock GMS does)
-        val cachedToken = DroidGuardPreferences.getCachedToken(context, cacheKey)
-        if (cachedToken != null) {
-            Log.i(TAG, "Using cached DroidGuard token for flow '$flow' (${cachedToken.size} bytes)")
-            if (flow == "tachyon_registration") Log.i("MicroGRcs", "tachyon DG=${cachedToken.size}B cached=true")
-            return cachedToken
-        }
-
         handleInitError?.let { return FallbackCreator.create(flow, context, map, it) }
         val handleProxy = this.handleProxy ?: return FallbackCreator.create(flow, context, map, IllegalStateException())
         return try {
-            val token = handleProxy.handle::class.java.getDeclaredMethod("ss", Map::class.java).invoke(handleProxy.handle, map) as ByteArray
-            // Cache the generated token with bindings-aware key
-            DroidGuardPreferences.setCachedToken(context, cacheKey, token)
-            Log.i(TAG, "Generated and cached new DroidGuard token for flow '$flow' (${token.size} bytes)")
-            if (flow == "tachyon_registration") Log.i("MicroGRcs", "tachyon DG=${token.size}B cached=false")
-            token
+            handleProxy.handle::class.java.getDeclaredMethod("ss", Map::class.java).invoke(handleProxy.handle, map) as ByteArray
         } catch (e: Exception) {
             try {
                 throw BytesException(handleProxy.extra, e)

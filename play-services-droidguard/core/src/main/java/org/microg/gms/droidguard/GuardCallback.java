@@ -7,24 +7,20 @@ package org.microg.gms.droidguard;
 
 import android.content.Context;
 import android.media.MediaDrm;
-import android.os.Bundle;
-import android.os.Parcelable;
-import android.os.UserManager;
 import android.util.Log;
 
+import org.microg.gms.droidguard.core.FallbackCreator;
 import org.microg.gms.settings.SettingsContract;
 
-import java.util.ArrayList;
+import java.util.HashMap;
 
 import static android.os.Build.VERSION.SDK_INT;
 
 /**
- * Callbacks invoked from the DroidGuard VM via JNI (GetMethodID).
+ * Callbacks invoked from the DroidGuard VM
  * <p>
  * We keep this file in Java to ensure ABI compatibility.
  * Methods are invoked by name from within the VM and thus must keep current name.
- * <p>
- * Methods a-h match stock GMS's RuntimeApi (com.google.android.gms.droidguard.loader.RuntimeApi).
  */
 public class GuardCallback {
     private static final String TAG = "GmsGuardCallback";
@@ -36,92 +32,49 @@ public class GuardCallback {
         this.packageName = packageName;
     }
 
-    /**
-     * Stock GMS: @Deprecated, returns "".
-     */
     public final String a(final byte[] array) {
-        return "";
+        Log.d(TAG, "a[?](" + array + ")");
+        return new String(FallbackCreator.create(new HashMap<>(), array, "", context, null));
     }
 
-    // getAndroidId (deprecated getter)
+    // getAndroidId
     public final String b() {
-        return getAndroidIdString();
+        try {
+            long androidId = SettingsContract.INSTANCE.getSettings(context, SettingsContract.CheckIn.INSTANCE.getContentUri(context), new String[]{SettingsContract.CheckIn.ANDROID_ID}, cursor -> cursor.getLong(0));
+            Log.d(TAG, "b[getAndroidId]() = " + androidId);
+            return String.valueOf(androidId);
+        } catch (Throwable e) {
+            Log.w(TAG, "Failed to get Android ID, fallback to random", e);
+        }
+        long androidId = (long) (Math.random() * Long.MAX_VALUE);
+        Log.d(TAG, "b[getAndroidId]() = " + androidId + " (random)");
+        return String.valueOf(androidId);
     }
 
     // getPackageName
     public final String c() {
+        Log.d(TAG, "c[getPackageName]() = " + packageName);
         return packageName;
     }
 
     // closeMediaDrmSession
     public final void d(final Object mediaDrm, final byte[] sessionId) {
+        Log.d(TAG, "d[closeMediaDrmSession](" + mediaDrm + ", " + sessionId + ")");
         synchronized (MediaDrmLock.LOCK) {
             if (SDK_INT >= 18) {
-                try {
-                    ((MediaDrm) mediaDrm).closeSession(sessionId);
-                } catch (Exception e) {
-                    Log.w(TAG, "closeMediaDrmSession failed", e);
-                }
+                ((MediaDrm) mediaDrm).closeSession(sessionId);
             }
         }
     }
 
-    /**
-     * Stock GMS: @Deprecated, no-op.
-     */
     public final void e(final int task) {
-    }
-
-    /**
-     * Android ID (modern getter). Returns 0 in direct boot mode (before first unlock).
-     */
-    public final String f() {
-        if (SDK_INT >= 24) {
-            try {
-                UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
-                if (um != null && !um.isUserUnlocked()) {
-                    return "0";
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "isUserUnlocked check failed", t);
-            }
+        Log.d(TAG, "e[?](" + task + ")");
+        // TODO: Open database
+        if (task == 1) {
+            // TODO
+        } else if (task == 0) {
+            // TODO
         }
-        return getAndroidIdString();
-    }
-
-    /**
-     * Play Protect isEnabled check. Stock GMS queries SafetyNet/Play Protect API.
-     */
-    public final Bundle g(final long timeoutMs) {
-        Bundle bundle = new Bundle();
-        bundle.putBoolean("ie", true);
-        bundle.putString("e", null);
-        return bundle;
-    }
-
-    /**
-     * Harmful apps scan data. Stock GMS queries Play Protect harmful apps API.
-     */
-    public final Bundle h(final long timeoutMs, final int maxApps) {
-        Bundle bundle = new Bundle();
-        bundle.putLong("lst", System.currentTimeMillis());
-        bundle.putInt("hls", -1);
-        bundle.putInt("hac", 0);
-        bundle.putParcelableArrayList("ha", new ArrayList<Parcelable>());
-        bundle.putString("e", null);
-        return bundle;
-    }
-
-    private String getAndroidIdString() {
-        try {
-            long androidId = SettingsContract.INSTANCE.getSettings(context,
-                    SettingsContract.CheckIn.INSTANCE.getContentUri(context),
-                    new String[]{SettingsContract.CheckIn.ANDROID_ID},
-                    cursor -> cursor.getLong(0));
-            return String.valueOf(androidId);
-        } catch (Throwable e) {
-            Log.w(TAG, "getAndroidIdString failed", e);
-        }
-        return "0";
+        // TODO: Set value in database
     }
 }

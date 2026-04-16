@@ -5,7 +5,6 @@
 
 package org.microg.gms.droidguard.core
 
-import android.accounts.AccountManager
 import android.content.Context
 import com.android.volley.NetworkResponse
 import com.android.volley.VolleyError
@@ -29,26 +28,19 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
     private val queue = singleInstanceOf { Volley.newRequestQueue(context.applicationContext) }
 
     fun createHandle(packageName: String, flow: String?, callback: GuardCallback, request: DroidGuardResultsRequest?): HandleProxy {
-        if (!DroidGuardPreferences.isLocalAvailable(context)) {
-            android.util.Log.e("DroidGuard", "createHandle(flow=$flow, pkg=$packageName): DroidGuard not available locally - check microG Settings > SafetyNet > DroidGuard enabled")
-            throw IllegalAccessException("DroidGuard should not be available locally")
-        }
+        if (!DroidGuardPreferences.isLocalAvailable(context)) throw IllegalAccessException("DroidGuard should not be available locally")
         val (vmKey, byteCode, bytes) = readFromDatabase(flow) ?: fetchFromServer(flow, packageName)
         return createHandleProxy(flow, vmKey, byteCode, bytes, callback, request)
     }
 
     fun createPingHandle(packageName: String, flow: String, callback: GuardCallback, pingData: PingData?): HandleProxy {
-        if (!DroidGuardPreferences.isLocalAvailable(context)) {
-            throw IllegalAccessException("DroidGuard should not be available locally")
-        }
+        if (!DroidGuardPreferences.isLocalAvailable(context)) throw IllegalAccessException("DroidGuard should not be available locally")
         val (vmKey, byteCode, bytes) = fetchFromServer(flow, createRequest(flow, packageName, pingData))
         return createHandleProxy(flow, vmKey, byteCode, bytes, callback, DroidGuardResultsRequest().also { it.clientVersion = 0 })
     }
 
     fun createLowLatencyHandle(flow: String?, callback: GuardCallback, request: DroidGuardResultsRequest?): HandleProxy {
-        if (!DroidGuardPreferences.isLocalAvailable(context)) {
-            throw IllegalAccessException("DroidGuard should not be available locally")
-        }
+        if (!DroidGuardPreferences.isLocalAvailable(context)) throw IllegalAccessException("DroidGuard should not be available locally")
         val (vmKey, byteCode, bytes) = readFromDatabase("fast") ?: throw Exception("low latency (fast) flow not available")
         return createHandleProxy(flow, vmKey, byteCode, bytes, callback, request)
     }
@@ -67,22 +59,8 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
         return dgDb.get(id)
     }
 
-    @android.annotation.SuppressLint("MissingPermission") // GMS process has GET_ACCOUNTS
     fun createRequest(flow: String?, packageName: String, pingData: PingData? = null, extra: ByteArray? = null): Request {
         ProfileManager.ensureInitialized(context)
-
-        // Stock GMS includes whether the device already has a Google account.
-        // This may influence the VM/bytecode returned for certain high-risk flows (e.g. constellation_verify).
-        // We must not hardcode this to false.
-        val hasGoogleAccount = try {
-            val am = AccountManager.get(context)
-            am.accounts.any { it.type == "com.google" }
-        } catch (_: Throwable) {
-            false
-        }
-
-        val cachedKeys = getCacheDir().list()?.map { it.decodeHex() }.orEmpty()
-
         return Request(
                 usage = Usage(flow, packageName),
                 info = listOf(
@@ -114,11 +92,11 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
                         KeyValuePair("VERSION.SDK_INT", Build.VERSION.SDK_INT.toString()),
                 ),
                 versionName = version.versionString,
-                versionCode = version.versionCode,
-                hasAccount = hasGoogleAccount,
+                versionCode = BuildConfig.VERSION_CODE,
+                hasAccount = false,
                 isGoogleCn = false,
                 enableInlineVm = true,
-                cached = cachedKeys,
+                cached = getCacheDir().list()?.map { it.decodeHex() }.orEmpty(),
                 arch = System.getProperty("os.arch"),
                 ping = pingData,
                 field10 = extra?.let { of(*it) },
@@ -131,7 +109,6 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
 
     fun fetchFromServer(flow: String?, request: Request): Triple<String, ByteArray, ByteArray> {
         ProfileManager.ensureInitialized(context)
-
         val future = RequestFuture.newFuture<SignedResponse>()
         queue.add(object : VolleyRequest<SignedResponse>(Method.POST, SERVER_URL, future) {
             override fun parseNetworkResponse(response: NetworkResponse): VolleyResponse<SignedResponse> {
@@ -158,10 +135,7 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
         })
         val signed: SignedResponse = future.get()
         val response = signed.unpack()
-        // Stock GMS uses uppercase hex for vmKey (cache subdirectory name visible in /proc/self/maps).
-        // okio ByteString.hex() returns lowercase — must uppercase to match stock.
-        val vmKey = response.vmChecksum!!.hex().uppercase()
-
+        val vmKey = response.vmChecksum!!.hex()
         if (!isValidCache(vmKey)) {
             val temp = File(getCacheDir(), "${UUID.randomUUID()}.apk")
             temp.parentFile!!.mkdirs()
@@ -170,9 +144,8 @@ class NetworkHandleProxyFactory(private val context: Context) : HandleProxyFacto
             temp.renameTo(getTheApkFile(vmKey))
             updateCacheTimestamp(vmKey)
             if (!isValidCache(vmKey)) {
-                android.util.Log.e("DroidGuard", "VM cache write failed for vmKey=$vmKey: apk=${getTheApkFile(vmKey).exists()} opt=${getOptDir(vmKey).isDirectory} cacheDir=${getCacheDir(vmKey).absolutePath}")
                 getCacheDir(vmKey).deleteRecursively()
-                throw IllegalStateException("VM cache validation failed after write for vmKey=$vmKey")
+                throw IllegalStateException()
             }
         }
         val id = "$flow/${version.versionString}/${Build.FINGERPRINT}"
