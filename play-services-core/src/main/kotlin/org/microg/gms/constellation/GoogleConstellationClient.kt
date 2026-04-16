@@ -75,10 +75,6 @@ class GoogleConstellationClient(private val context: Context) {
         // settings put global microg_constellation_force_one_time_verification off
         private const val FORCE_ONE_TIME_VERIFICATION_KEY = "microg_constellation_force_one_time_verification"
 
-        // Constellation FCM sender ID (from GMS Phenotype IidToken__default_project_number)
-        const val CONSTELLATION_SENDER_ID = "496232013492"
-        // Read-only PhoneNumber API sender ID (from GMS Phenotype IidToken__read_only_project_number)
-        const val READ_ONLY_SENDER_ID = "745476177629"
 
         /**
          * Get or register the IID token for Constellation.
@@ -93,9 +89,9 @@ class GoogleConstellationClient(private val context: Context) {
         fun getOrRegisterIidToken(
             context: Context,
             packageName: String,
-            senderId: String = CONSTELLATION_SENDER_ID
+            senderId: String = ConstellationConstants.SENDER_CONSTELLATION
         ): Pair<String, String> {
-            val prefs = context.getSharedPreferences("constellation_iid", Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION_IID, Context.MODE_PRIVATE)
 
             // Check for cached token (either self-registered or seeded from stock GMS)
             val hasKeyPair = prefs.getString("key_private", null) != null
@@ -126,8 +122,8 @@ class GoogleConstellationClient(private val context: Context) {
             }
 
             // For Constellation primary sender, also check constellation_prefs.xml gcm_token
-            if (senderId == CONSTELLATION_SENDER_ID) {
-                val stockPrefs = context.getSharedPreferences("constellation_prefs", Context.MODE_PRIVATE)
+            if (senderId == ConstellationConstants.SENDER_CONSTELLATION) {
+                val stockPrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
                 val stockGcmToken = stockPrefs.getString("gcm_token", null)
                 if (!stockGcmToken.isNullOrEmpty()) {
                     Log.i(TAG, "Using preserved stock GMS IID token for sender $senderId (from constellation_prefs gcm_token): ${stockGcmToken.take(20)}...")
@@ -351,12 +347,12 @@ class GoogleConstellationClient(private val context: Context) {
                 try {
                 // Get IID token - MUST be registered with Constellation project ID!
                 // Uses shared method that handles caching, registration, and fallbacks
-                val (iidToken, iidSource) = getOrRegisterIidToken(context, packageName, CONSTELLATION_SENDER_ID)
+                val (iidToken, iidSource) = getOrRegisterIidToken(context, packageName, ConstellationConstants.SENDER_CONSTELLATION)
                 Log.d(TAG, "IID token source: $iidSource, token prefix: ${iidToken.take(20)}...")
 
                 // GPNV (PhoneNumber/GetVerifiedPhoneNumbers) uses the read-only IID sender in stock GMS
                 // (icet.e(): IidToken__read_only_project_number = 745476177629).
-                val (readOnlyIidToken, readOnlyIidSource) = getOrRegisterIidToken(context, packageName, READ_ONLY_SENDER_ID)
+                val (readOnlyIidToken, readOnlyIidSource) = getOrRegisterIidToken(context, packageName, ConstellationConstants.SENDER_READ_ONLY)
                 Log.d(TAG, "Read-only IID token source: $readOnlyIidSource, token prefix: ${readOnlyIidToken.take(20)}...")
 
                 // Calculate iidHash for DroidGuard content bindings
@@ -427,7 +423,7 @@ class GoogleConstellationClient(private val context: Context) {
                 // GMS: bekg.java:841-856 - reads from SharedPrefs "public_key", generates if missing
                 // GMS: bekf.java:92 - signs with SHA256withECDSA using private key
                 // We need to persist BOTH keys so we can sign client_credentials after server acknowledges
-                val keyPrefs = context.getSharedPreferences("constellation_prefs", Context.MODE_PRIVATE)
+                val keyPrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
                 val storedPublicKeyBase64 = keyPrefs.getString("public_key", null)
                 val storedPrivateKeyBase64 = keyPrefs.getString("private_key", null)
 
@@ -791,7 +787,7 @@ class GoogleConstellationClient(private val context: Context) {
 
                 // device_android_id = SharedPreferences "primary_device_id" with fallback (GMS bejs.java:116-123, beob.java:57-59)
                 // For new clients: primary_device_id=0, then if flag.l() && isSystemUser() && 0==0, falls back to user_android_id
-                val devicePrefs = context.getSharedPreferences("constellation_prefs", Context.MODE_PRIVATE)
+                val devicePrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
                 val primaryDeviceId = devicePrefs.getLong("primary_device_id", 0L)
 
                 // user_android_id = Settings.Secure.ANDROID_ID (GMS bejs.java:42-54, bdzc.d)
@@ -866,7 +862,7 @@ class GoogleConstellationClient(private val context: Context) {
                         @Suppress("DEPRECATION")
                         android.telephony.SmsManager.getDefault()
                     }
-                    val intent = android.content.Intent("com.google.android.gms.constellation.SILENT_SMS_RECEIVED")
+                    val intent = android.content.Intent(ConstellationConstants.ACTION_SILENT_SMS_RECEIVED)
                         .setPackage(context.packageName)
                     // FLAG_MUTABLE is REQUIRED: createAppSpecificSmsToken fires PendingIntent via
                     // send(ctx, code, fillInIntent) where fillInIntent carries PDU extras.
@@ -1572,7 +1568,7 @@ class GoogleConstellationClient(private val context: Context) {
                             // Persist a minimal breadcrumb so success is visible even if logcat rolls.
                             try {
                                 val shaPrefix = jwtSha256HexPrefix(jwt)
-                                context.getSharedPreferences("constellation_prefs", Context.MODE_PRIVATE)
+                                context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
                                     .edit()
                                     .putString("last_fallback_jwt_sha256_8", shaPrefix)
                                     .putLong("last_fallback_jwt_time_ms", System.currentTimeMillis())

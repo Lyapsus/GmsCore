@@ -13,6 +13,7 @@ import android.os.Parcel;
 import android.os.RemoteException;
 import android.util.Log;
 
+import org.microg.gms.constellation.ConstellationConstants;
 import org.microg.gms.constellation.GoogleConstellationClient;
 
 /**
@@ -54,9 +55,6 @@ public class AsterismServiceImpl extends Binder {
     private static final int CB_ON_CONSENT_FETCHED = 1;
     private static final int CB_ON_CONSENT_REGISTERED = 2;
     private static final int CB_ON_IS_PNVR_DEVICE = 3;
-
-    // Messages IID sender for ACS POST header
-    private static final String MESSAGES_IID_SENDER = "466216207879";
 
     private final Context context;
 
@@ -104,9 +102,9 @@ public class AsterismServiceImpl extends Binder {
             String iidToken = null;
             try {
                 kotlin.Pair<String, String> result = GoogleConstellationClient.getOrRegisterIidToken(
-                    context, context.getPackageName(), MESSAGES_IID_SENDER);
+                    context, context.getPackageName(), ConstellationConstants.SENDER_MESSAGES_IID);
                 iidToken = result.getFirst();
-                Log.i(TAG, "IID token for sender " + MESSAGES_IID_SENDER + ": " +
+                Log.i(TAG, "IID token for sender " + ConstellationConstants.SENDER_MESSAGES_IID + ": " +
                     (iidToken != null ? iidToken.substring(0, Math.min(20, iidToken.length())) + "..." : "null"));
             } catch (Exception e) {
                 Log.w(TAG, "Failed to get IID token: " + e.getMessage());
@@ -149,7 +147,7 @@ public class AsterismServiceImpl extends Binder {
             String iidToken = null;
             try {
                 kotlin.Pair<String, String> result = GoogleConstellationClient.getOrRegisterIidToken(
-                    context, context.getPackageName(), MESSAGES_IID_SENDER);
+                    context, context.getPackageName(), ConstellationConstants.SENDER_MESSAGES_IID);
                 iidToken = result.getFirst();
             } catch (Exception e) {
                 Log.w(TAG, "Failed to get IID token for setConsent response: " + e.getMessage());

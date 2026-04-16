@@ -15,7 +15,7 @@ import android.util.Log
 import google.internal.communications.phonedeviceverification.v1.*
 import java.util.concurrent.CompletableFuture
 
-private const val TAG = "GmsConstellationClient"
+private const val TAG = "GmsConstellationChallenge"
 
 /** OTP SMS data: full body + sender, matching stock GMS bfqy.e(originatingAddress, messageBody) */
 data class OtpSmsResult(val messageBody: String, val originatingAddress: String)
@@ -47,11 +47,11 @@ object SmsInbox {
         }
         if (Build.VERSION.SDK_INT >= 33) {
             context.registerReceiver(silentReceiver!!,
-                IntentFilter("com.google.android.gms.constellation.SILENT_SMS_RECEIVED"),
+                IntentFilter(ConstellationConstants.ACTION_SILENT_SMS_RECEIVED),
                 Context.RECEIVER_NOT_EXPORTED)
         } else {
             context.registerReceiver(silentReceiver!!,
-                IntentFilter("com.google.android.gms.constellation.SILENT_SMS_RECEIVED"))
+                IntentFilter(ConstellationConstants.ACTION_SILENT_SMS_RECEIVED))
         }
 
         val hasReceiveSms = context.checkSelfPermission(android.Manifest.permission.RECEIVE_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED

@@ -18,7 +18,7 @@ import android.util.Log
 import google.internal.communications.phonedeviceverification.v1.*
 import okio.ByteString
 
-private const val TAG = "GmsConstellationClient"
+private const val TAG = "GmsConstellationProto"
 
 // ---- Data classes for gathered system state ----
 

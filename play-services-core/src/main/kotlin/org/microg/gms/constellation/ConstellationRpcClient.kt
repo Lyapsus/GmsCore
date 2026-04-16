@@ -91,7 +91,7 @@ class ConstellationRpcClient(
     // ── DroidGuard state ────────────────────────────────────────────────
 
     private val dgCachePrefs: SharedPreferences =
-        context.getSharedPreferences("constellation_prefs", Context.MODE_PRIVATE)
+        context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
 
     private var dgHandle: DroidGuardHandle? = null
     private var dgHandleFlow: String? = null
@@ -311,7 +311,7 @@ class ConstellationRpcClient(
     }
 
     companion object {
-        private const val TAG = "GmsConstellationClient"
+        private const val TAG = "GmsConstellationRpc"
 
         private const val DG_FLOW_OVERRIDE_GLOBAL_KEY = "microg_constellation_dg_flow_override"
         private const val DG_FLOW_OVERRIDE_RPC_MAP_KEY = "microg_constellation_dg_flow_rpc_map"

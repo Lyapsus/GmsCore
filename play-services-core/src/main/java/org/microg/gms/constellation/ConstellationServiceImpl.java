@@ -488,7 +488,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
      */
     private String computeFidFromEcKey() {
         try {
-            android.content.SharedPreferences keyPrefs = context.getSharedPreferences("constellation_prefs", Context.MODE_PRIVATE);
+            android.content.SharedPreferences keyPrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE);
             String pubKeyB64 = keyPrefs.getString("public_key", null);
             if (pubKeyB64 == null) return null;
             byte[] pubKeyBytes = android.util.Base64.decode(pubKeyB64, android.util.Base64.DEFAULT);
@@ -556,7 +556,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             senderId = Long.toString(request.subscriptionId);
             Log.i(TAG, "getIidToken() called with sender=" + senderId);
         } else {
-            senderId = GoogleConstellationClient.CONSTELLATION_SENDER_ID;
+            senderId = ConstellationConstants.SENDER_CONSTELLATION;
             Log.i(TAG, "getIidToken() called with no sender, using default=" + senderId);
         }
 
@@ -573,7 +573,7 @@ public class ConstellationServiceImpl extends IConstellationApiService.Stub {
             // Stock (bevs.java:50): bfpdVarA.a = FID (Firebase Installation ID)
             // Our FID equivalent = instance_id from constellation_iid prefs
             // (created as side effect of getOrRegisterIidToken when registering fresh)
-            android.content.SharedPreferences iidPrefs = context.getSharedPreferences("constellation_iid", Context.MODE_PRIVATE);
+            android.content.SharedPreferences iidPrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION_IID, Context.MODE_PRIVATE);
             String fid = iidPrefs.getString("instance_id", "");
             if (fid.isEmpty()) {
                 // Fallback: compute FID same as stock cdqp.b() = SHA1(ecPublicKey)[0:8] with
