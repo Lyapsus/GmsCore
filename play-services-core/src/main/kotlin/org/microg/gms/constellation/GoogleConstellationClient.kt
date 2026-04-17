@@ -364,20 +364,6 @@ class GoogleConstellationClient(private val context: Context) {
                     android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)  // Flag 3 = NO_PADDING | NO_WRAP
                 val iidHash = iidHashFull.substring(0, 32)  // Truncate to 32 chars like GMS
 
-                // Load stored verification_tokens for SyncRequest (stock GMS bewt.java:702-704)
-                fun loadVerificationTokens(prefs: android.content.SharedPreferences): List<google.internal.communications.phonedeviceverification.v1.VerificationToken> {
-                    val stored = prefs.getStringSet("verification_tokens", null) ?: return emptyList()
-                    return stored.mapNotNull { b64 ->
-                        try {
-                            google.internal.communications.phonedeviceverification.v1.VerificationToken.ADAPTER.decode(
-                                android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
-                            )
-                        } catch (e: Exception) { null }
-                    }.also {
-                        if (it.isNotEmpty()) Log.d(TAG, "Loaded ${it.size} verification_tokens from storage")
-                    }
-                }
-
                 // Setup gRPC + DG via ConstellationRpcClient
                 val gaiaTokens = getGaiaTokens(packageName)
                 if (gaiaTokens.isNotEmpty()) {
@@ -516,47 +502,6 @@ class GoogleConstellationClient(private val context: Context) {
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to create client credentials", e)
                         return null
-                    }
-                }
-
-                // GetVerifiedPhoneNumbersRequest uses a separate auth container (IIDTokenAuth in discovery;
-                // hzdq.java in GMS) that carries the IID token plus an ECDSA signature + timestamp.
-                // The discovery doc explicitly warns non-allowlisted requests may require these fields,
-                // so we generate them when we have a persisted Constellation private key.
-                fun createIidTokenAuth(iidTokenForSig: String): ClientCredentialsProto {
-                    if (privateKey == null) {
-                        Log.w(TAG, "GPNV auth: private key missing; sending iid_token without client_signature")
-                        return ClientCredentialsProto(
-                            iid_token = iidTokenForSig,
-                            client_signature = ByteString.EMPTY,
-                            signature_timestamp = null
-                        )
-                    }
-
-                    val nowMillis = System.currentTimeMillis()
-                    val seconds = nowMillis / 1000
-                    val nanos = ((nowMillis % 1000) * 1_000_000).toInt()
-                    val signingString = "$iidTokenForSig:$seconds:$nanos"
-
-                    return try {
-                        val signature = java.security.Signature.getInstance("SHA256withECDSA")
-                        signature.initSign(privateKey)
-                        signature.update(signingString.toByteArray(Charsets.UTF_8))
-                        val signatureBytes = signature.sign()
-                        val ts = Instant.ofEpochSecond(seconds, nanos.toLong())
-
-                        ClientCredentialsProto(
-                            iid_token = iidTokenForSig,
-                            client_signature = ByteString.of(*signatureBytes),
-                            signature_timestamp = ts
-                        )
-                    } catch (e: Exception) {
-                        Log.w(TAG, "GPNV auth: failed to generate client_signature; sending iid_token without signature", e)
-                        ClientCredentialsProto(
-                            iid_token = iidTokenForSig,
-                            client_signature = ByteString.EMPTY,
-                            signature_timestamp = null
-                        )
                     }
                 }
 
@@ -733,21 +678,6 @@ class GoogleConstellationClient(private val context: Context) {
                     ?: ""
                 val idTokenCallingPackage = callingPackage ?: ""
                 Log.i(TAG, "IdTokenRequest: certificate_hash_len=${idTokenCertificateHash.length}, calling_package=$idTokenCallingPackage, token_nonce_len=${idTokenNonce.length}, source=${if (request?.idTokenRequest != null) "aidl" else if (audienceOverride.isNotEmpty()) "override" else "empty"}")
-
-                // Build a GetVerifiedPhoneNumbersRequest (identical structure used by all GPNV call sites)
-                fun buildGpnvRequest(): GetVerifiedPhoneNumbersRequest {
-                    return GetVerifiedPhoneNumbersRequest(
-                        session_id = sessionId,
-                        client_credentials = createIidTokenAuth(readOnlyIidToken),
-                        selection_types = listOf(1),
-                        id_token_request = IdTokenRequestProto(
-                            certificate_hash = idTokenCertificateHash,
-                            calling_package = idTokenCallingPackage,
-                            token_nonce = idTokenNonce
-                        ),
-                        droidguard_result = ""
-                    )
-                }
 
                 // Stock GMS (bevm.java:1170-1253) populates ALL 5 CarrierInfo fields
                 val carrierInfo = buildCarrierInfo(
@@ -1214,7 +1144,14 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.i(TAG, "Calling GetVerifiedPhoneNumbers to retrieve JWT token...")
 
                     try {
-                        val getTokensRequest = buildGpnvRequest()
+                        val getTokensRequest = buildGpnvRequest(
+                            sessionId = sessionId,
+                            privateKey = privateKey,
+                            readOnlyIidToken = readOnlyIidToken,
+                            idTokenCertificateHash = idTokenCertificateHash,
+                            idTokenCallingPackage = idTokenCallingPackage,
+                            idTokenNonce = idTokenNonce
+                        )
 
                         // Create PhoneNumber client (separate service from PhoneDeviceVerification)
                         val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
@@ -1240,7 +1177,14 @@ class GoogleConstellationClient(private val context: Context) {
                 if (hasNone && !hasVerified && !hasPending) {
                     Log.i(TAG, "NONE state: trying GPNV as best-effort (stock→microG swap scenario)...")
                     try {
-                        val getTokensRequest = buildGpnvRequest()
+                        val getTokensRequest = buildGpnvRequest(
+                            sessionId = sessionId,
+                            privateKey = privateKey,
+                            readOnlyIidToken = readOnlyIidToken,
+                            idTokenCertificateHash = idTokenCertificateHash,
+                            idTokenCallingPackage = idTokenCallingPackage,
+                            idTokenNonce = idTokenNonce
+                        )
                         val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
                         val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
                         if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
@@ -1480,7 +1424,14 @@ class GoogleConstellationClient(private val context: Context) {
 
                         if (newState == VerificationState.VERIFICATION_STATE_VERIFIED) {
                             Log.i(TAG, "VERIFIED after round $round! Calling GPNV for JWT...")
-                            val getTokensRequest = buildGpnvRequest()
+                            val getTokensRequest = buildGpnvRequest(
+                                sessionId = sessionId,
+                                privateKey = privateKey,
+                                readOnlyIidToken = readOnlyIidToken,
+                                idTokenCertificateHash = idTokenCertificateHash,
+                                idTokenCallingPackage = idTokenCallingPackage,
+                                idTokenNonce = idTokenNonce
+                            )
                             val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
                             val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
                             if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
@@ -1554,7 +1505,14 @@ class GoogleConstellationClient(private val context: Context) {
                     // ============================================================
                     Log.i(TAG, "GPNV_FALLBACK: START - GetConsent/Sync failed, checking for cached verification")
                     try {
-                        val fallbackRequest = buildGpnvRequest()
+                        val fallbackRequest = buildGpnvRequest(
+                            sessionId = sessionId,
+                            privateKey = privateKey,
+                            readOnlyIidToken = readOnlyIidToken,
+                            idTokenCertificateHash = idTokenCertificateHash,
+                            idTokenCallingPackage = idTokenCallingPackage,
+                            idTokenNonce = idTokenNonce
+                        )
 
                         Log.i(TAG, "GPNV_FALLBACK: Calling GetVerifiedPhoneNumbers after verification state: sync-failed")
                         val fallbackResponse = rpc.getVerifiedPhoneNumbers(fallbackRequest)
@@ -1615,6 +1573,84 @@ class GoogleConstellationClient(private val context: Context) {
             sb.append(String.format("%02x", b))
         }
         return sb.toString()
+    }
+
+    private fun loadVerificationTokens(
+        prefs: android.content.SharedPreferences
+    ): List<google.internal.communications.phonedeviceverification.v1.VerificationToken> {
+        val stored = prefs.getStringSet("verification_tokens", null) ?: return emptyList()
+        return stored.mapNotNull { b64 ->
+            try {
+                google.internal.communications.phonedeviceverification.v1.VerificationToken.ADAPTER.decode(
+                    android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }.also {
+            if (it.isNotEmpty()) Log.d(TAG, "Loaded ${it.size} verification_tokens from storage")
+        }
+    }
+
+    private fun createIidTokenAuth(
+        privateKey: java.security.PrivateKey?,
+        iidTokenForSig: String
+    ): ClientCredentialsProto {
+        if (privateKey == null) {
+            Log.w(TAG, "GPNV auth: private key missing; sending iid_token without client_signature")
+            return ClientCredentialsProto(
+                iid_token = iidTokenForSig,
+                client_signature = ByteString.EMPTY,
+                signature_timestamp = null
+            )
+        }
+
+        val nowMillis = System.currentTimeMillis()
+        val seconds = nowMillis / 1000
+        val nanos = ((nowMillis % 1000) * 1_000_000).toInt()
+        val signingString = "$iidTokenForSig:$seconds:$nanos"
+
+        return try {
+            val signature = java.security.Signature.getInstance("SHA256withECDSA")
+            signature.initSign(privateKey)
+            signature.update(signingString.toByteArray(Charsets.UTF_8))
+            val signatureBytes = signature.sign()
+            val ts = Instant.ofEpochSecond(seconds, nanos.toLong())
+
+            ClientCredentialsProto(
+                iid_token = iidTokenForSig,
+                client_signature = ByteString.of(*signatureBytes),
+                signature_timestamp = ts
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "GPNV auth: failed to generate client_signature; sending iid_token without signature", e)
+            ClientCredentialsProto(
+                iid_token = iidTokenForSig,
+                client_signature = ByteString.EMPTY,
+                signature_timestamp = null
+            )
+        }
+    }
+
+    private fun buildGpnvRequest(
+        sessionId: String,
+        privateKey: java.security.PrivateKey?,
+        readOnlyIidToken: String,
+        idTokenCertificateHash: String,
+        idTokenCallingPackage: String,
+        idTokenNonce: String
+    ): GetVerifiedPhoneNumbersRequest {
+        return GetVerifiedPhoneNumbersRequest(
+            session_id = sessionId,
+            client_credentials = createIidTokenAuth(privateKey, readOnlyIidToken),
+            selection_types = listOf(1),
+            id_token_request = IdTokenRequestProto(
+                certificate_hash = idTokenCertificateHash,
+                calling_package = idTokenCallingPackage,
+                token_nonce = idTokenNonce
+            ),
+            droidguard_result = ""
+        )
     }
 
     private fun decodeJwtPayloadJson(jwt: String): JSONObject? {
