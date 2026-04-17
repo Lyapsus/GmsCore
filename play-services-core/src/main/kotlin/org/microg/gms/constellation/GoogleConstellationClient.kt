@@ -64,6 +64,12 @@ import google.internal.communications.phonedeviceverification.v1.ProceedResponse
 import google.internal.communications.phonedeviceverification.v1.ConsentValue
 
 class GoogleConstellationClient(private val context: Context) {
+    private data class ConstellationKeyMaterial(
+        val publicKeyBytes: ByteString,
+        val privateKey: java.security.PrivateKey?,
+        val isPublicKeyAcked: Boolean
+    )
+
     companion object {
         private const val TAG = "GmsConstellationClient"
         // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
@@ -373,7 +379,6 @@ class GoogleConstellationClient(private val context: Context) {
                 // Get real Spatula token from AppCertManager (upstream microG implementation)
                 // Stock GMS: ajom.b("com.google.android.gms") → IAppCertService.getSpatulaHeader()
                 // Returns Base64-encoded protobuf with HMAC, deviceId, keyCert
-                var spatulaHeaderSource = "unattempted"
                 val spatulaHeader = try {
                     Log.d(TAG, "Fetching Spatula header (10s timeout)...")
                     val spatula = runBlocking {
@@ -382,15 +387,12 @@ class GoogleConstellationClient(private val context: Context) {
                         }
                     }
                     if (spatula != null) {
-                        spatulaHeaderSource = "appcert"
                         Log.d(TAG, "Spatula header obtained (${spatula.length} chars)")
                     } else {
-                        spatulaHeaderSource = "timeout_or_null"
                         Log.w(TAG, "Spatula header returned null (timeout or device key not available)")
                     }
                     spatula
                 } catch (e: Exception) {
-                    spatulaHeaderSource = "exception:${e.javaClass.simpleName}"
                     Log.w(TAG, "Failed to get Spatula header: ${e.message}")
                     null
                 }
@@ -405,57 +407,10 @@ class GoogleConstellationClient(private val context: Context) {
                 )
                 val rpc = rpcClient!!  // Non-null local ref for use within this try block
 
-                // Get or generate client key pair (MUST persist BOTH keys like GMS does!)
-                // GMS: bekg.java:841-856 - reads from SharedPrefs "public_key", generates if missing
-                // GMS: bekf.java:92 - signs with SHA256withECDSA using private key
-                // We need to persist BOTH keys so we can sign client_credentials after server acknowledges
                 val keyPrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
-                val storedPublicKeyBase64 = keyPrefs.getString("public_key", null)
-                val storedPrivateKeyBase64 = keyPrefs.getString("private_key", null)
-
-                val (publicKeyBytes: ByteString, privateKey: java.security.PrivateKey?) = if (!storedPublicKeyBase64.isNullOrEmpty() && !storedPrivateKeyBase64.isNullOrEmpty()) {
-                    // Use stored key pair (like GMS does)
-                    try {
-                        val publicDecoded = android.util.Base64.decode(storedPublicKeyBase64, android.util.Base64.DEFAULT)
-                        val privateDecoded = android.util.Base64.decode(storedPrivateKeyBase64, android.util.Base64.DEFAULT)
-                        // Reconstruct private key from PKCS8 encoded bytes
-                        val keyFactory = java.security.KeyFactory.getInstance("EC")
-                        val privKeySpec = java.security.spec.PKCS8EncodedKeySpec(privateDecoded)
-                        val privKey = keyFactory.generatePrivate(privKeySpec)
-                        Log.d(TAG, "Using stored key pair (public: ${publicDecoded.size} bytes, private: ${privateDecoded.size} bytes)")
-                        Pair(ByteString.of(*publicDecoded), privKey)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to decode stored keys, generating new", e)
-                        // Clear invalid keys and generate new
-                        keyPrefs.edit().remove("public_key").remove("private_key").apply()
-                        val keyGen = KeyPairGenerator.getInstance("EC")
-                        keyGen.initialize(256)
-                        val keyPair = keyGen.generateKeyPair()
-                        val publicEncoded = keyPair.public.encoded
-                        val privateEncoded = keyPair.private.encoded
-                        // Store both keys for next time
-                        keyPrefs.edit()
-                            .putString("public_key", android.util.Base64.encodeToString(publicEncoded, android.util.Base64.DEFAULT))
-                            .putString("private_key", android.util.Base64.encodeToString(privateEncoded, android.util.Base64.DEFAULT))
-                            .apply()
-                        Log.d(TAG, "Generated and stored new key pair (public: ${publicEncoded.size} bytes, private: ${privateEncoded.size} bytes)")
-                        Pair(ByteString.of(*publicEncoded), keyPair.private)
-                    }
-                } else {
-                    // Generate new key pair and store BOTH keys (like GMS does on first run)
-                    val keyGen = KeyPairGenerator.getInstance("EC")
-                    keyGen.initialize(256)
-                    val keyPair = keyGen.generateKeyPair()
-                    val publicEncoded = keyPair.public.encoded
-                    val privateEncoded = keyPair.private.encoded
-                    // Store both keys for next time
-                    keyPrefs.edit()
-                        .putString("public_key", android.util.Base64.encodeToString(publicEncoded, android.util.Base64.DEFAULT))
-                        .putString("private_key", android.util.Base64.encodeToString(privateEncoded, android.util.Base64.DEFAULT))
-                        .apply()
-                    Log.d(TAG, "Generated and stored new key pair (public: ${publicEncoded.size} bytes, private: ${privateEncoded.size} bytes)")
-                    Pair(ByteString.of(*publicEncoded), keyPair.private)
-                }
+                val keyMaterial = loadOrCreateKeyMaterial(keyPrefs)
+                val publicKeyBytes = keyMaterial.publicKeyBytes
+                val privateKey = keyMaterial.privateKey
 
                 val publicKeyBase64 = android.util.Base64.encodeToString(
                     publicKeyBytes.toByteArray(),
@@ -464,7 +419,7 @@ class GoogleConstellationClient(private val context: Context) {
 
                 // Check if server has acknowledged our public key (GMS bbah.java:1163)
                 // If true, we need to sign requests with client_credentials
-                val isPublicKeyAcked = keyPrefs.getBoolean("is_public_key_acked", false)
+                val isPublicKeyAcked = keyMaterial.isPublicKeyAcked
                 Log.d(TAG, "is_public_key_acked: $isPublicKeyAcked")
 
 
@@ -1590,6 +1545,53 @@ class GoogleConstellationClient(private val context: Context) {
         }.also {
             if (it.isNotEmpty()) Log.d(TAG, "Loaded ${it.size} verification_tokens from storage")
         }
+    }
+
+    private fun loadOrCreateKeyMaterial(
+        keyPrefs: android.content.SharedPreferences
+    ): ConstellationKeyMaterial {
+        val storedPublicKeyBase64 = keyPrefs.getString("public_key", null)
+        val storedPrivateKeyBase64 = keyPrefs.getString("private_key", null)
+
+        val (publicKeyBytes, privateKey) = if (!storedPublicKeyBase64.isNullOrEmpty() && !storedPrivateKeyBase64.isNullOrEmpty()) {
+            try {
+                val publicDecoded = android.util.Base64.decode(storedPublicKeyBase64, android.util.Base64.DEFAULT)
+                val privateDecoded = android.util.Base64.decode(storedPrivateKeyBase64, android.util.Base64.DEFAULT)
+                val keyFactory = java.security.KeyFactory.getInstance("EC")
+                val privKeySpec = java.security.spec.PKCS8EncodedKeySpec(privateDecoded)
+                val privKey = keyFactory.generatePrivate(privKeySpec)
+                Log.d(TAG, "Using stored key pair (public: ${publicDecoded.size} bytes, private: ${privateDecoded.size} bytes)")
+                Pair(ByteString.of(*publicDecoded), privKey)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to decode stored keys, generating new", e)
+                keyPrefs.edit().remove("public_key").remove("private_key").apply()
+                generateAndStoreKeyMaterial(keyPrefs)
+            }
+        } else {
+            generateAndStoreKeyMaterial(keyPrefs)
+        }
+
+        return ConstellationKeyMaterial(
+            publicKeyBytes = publicKeyBytes,
+            privateKey = privateKey,
+            isPublicKeyAcked = keyPrefs.getBoolean("is_public_key_acked", false)
+        )
+    }
+
+    private fun generateAndStoreKeyMaterial(
+        keyPrefs: android.content.SharedPreferences
+    ): Pair<ByteString, java.security.PrivateKey> {
+        val keyGen = KeyPairGenerator.getInstance("EC")
+        keyGen.initialize(256)
+        val keyPair = keyGen.generateKeyPair()
+        val publicEncoded = keyPair.public.encoded
+        val privateEncoded = keyPair.private.encoded
+        keyPrefs.edit()
+            .putString("public_key", android.util.Base64.encodeToString(publicEncoded, android.util.Base64.DEFAULT))
+            .putString("private_key", android.util.Base64.encodeToString(privateEncoded, android.util.Base64.DEFAULT))
+            .apply()
+        Log.d(TAG, "Generated and stored new key pair (public: ${publicEncoded.size} bytes, private: ${privateEncoded.size} bytes)")
+        return Pair(ByteString.of(*publicEncoded), keyPair.private)
     }
 
     private fun createIidTokenAuth(
