@@ -83,6 +83,13 @@ class GoogleConstellationClient(private val context: Context) {
         val deviceUserId: Long
     )
 
+    private data class ResolvedIdTokenCarrierInfo(
+        val idTokenCertificateHash: String,
+        val idTokenNonce: String,
+        val idTokenCallingPackage: String,
+        val carrierInfo: CarrierInfo
+    )
+
     companion object {
         private const val TAG = "GmsConstellationClient"
         // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
@@ -600,31 +607,16 @@ class GoogleConstellationClient(private val context: Context) {
                 // From captured JWT: aud = "357317899610-64uqvc4ala96muamloactrflpdcdcere.apps.googleusercontent.com"
                 // Server uses certificate_hash as JWT audience, token_nonce as JWT nonce claim.
                 // Override via: adb shell settings put global microg_constellation_id_token_audience <value>
-                val audienceOverride = try {
-                    android.provider.Settings.Global.getString(context.contentResolver, "microg_constellation_id_token_audience") ?: ""
-                } catch (e: Exception) { "" }
-                val nonceOverride = try {
-                    android.provider.Settings.Global.getString(context.contentResolver, "microg_constellation_id_token_nonce") ?: ""
-                } catch (e: Exception) { "" }
-                val idTokenCertificateHash = request?.idTokenRequest?.audience
-                    ?: audienceOverride.ifEmpty { null }
-                    ?: ""
-                val idTokenNonce = request?.idTokenRequest?.nonce
-                    ?: nonceOverride.ifEmpty { null }
-                    ?: ""
-                val idTokenCallingPackage = callingPackage ?: ""
-                Log.i(TAG, "IdTokenRequest: certificate_hash_len=${idTokenCertificateHash.length}, calling_package=$idTokenCallingPackage, token_nonce_len=${idTokenNonce.length}, source=${if (request?.idTokenRequest != null) "aidl" else if (audienceOverride.isNotEmpty()) "override" else "empty"}")
-
-                // Stock GMS (bevm.java:1170-1253) populates ALL 5 CarrierInfo fields
-                val carrierInfo = buildCarrierInfo(
+                val idTokenCarrierInfo = resolveIdTokenCarrierInfo(
+                    request = request,
+                    callingPackage = callingPackage,
                     phoneNumber = phoneNumber,
-                    subscriptionId = request?.timeout ?: 0L,
-                    idTokenCertificateHash = idTokenCertificateHash,
-                    idTokenNonce = idTokenNonce,
-                    callingPackage = idTokenCallingPackage,
                     imsiRequests = imsiRequests
                 )
-                Log.d(TAG, "CarrierInfo: phone_number=$phoneNumber, sub_id=${request?.timeout}, calling_package=$idTokenCallingPackage, imsi_requests=${imsiRequests.size}")
+                val idTokenCertificateHash = idTokenCarrierInfo.idTokenCertificateHash
+                val idTokenNonce = idTokenCarrierInfo.idTokenNonce
+                val idTokenCallingPackage = idTokenCarrierInfo.idTokenCallingPackage
+                val carrierInfo = idTokenCarrierInfo.carrierInfo
 
                 val deviceIdentity = resolveDeviceIdentity()
                 val deviceAndroidId = deviceIdentity.deviceAndroidId
@@ -1636,6 +1628,49 @@ class GoogleConstellationClient(private val context: Context) {
             deviceAndroidId = deviceAndroidId,
             userAndroidId = userAndroidId,
             deviceUserId = deviceUserId
+        )
+    }
+
+    private fun resolveIdTokenCarrierInfo(
+        request: AidlVerifyPhoneNumberRequest?,
+        callingPackage: String?,
+        phoneNumber: String,
+        imsiRequests: List<IMSIRequest>
+    ): ResolvedIdTokenCarrierInfo {
+        val audienceOverride = try {
+            Settings.Global.getString(context.contentResolver, "microg_constellation_id_token_audience") ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+        val nonceOverride = try {
+            Settings.Global.getString(context.contentResolver, "microg_constellation_id_token_nonce") ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+        val idTokenCertificateHash = request?.idTokenRequest?.audience
+            ?: audienceOverride.ifEmpty { null }
+            ?: ""
+        val idTokenNonce = request?.idTokenRequest?.nonce
+            ?: nonceOverride.ifEmpty { null }
+            ?: ""
+        val idTokenCallingPackage = callingPackage ?: ""
+        Log.i(TAG, "IdTokenRequest: certificate_hash_len=${idTokenCertificateHash.length}, calling_package=$idTokenCallingPackage, token_nonce_len=${idTokenNonce.length}, source=${if (request?.idTokenRequest != null) "aidl" else if (audienceOverride.isNotEmpty()) "override" else "empty"}")
+
+        val carrierInfo = buildCarrierInfo(
+            phoneNumber = phoneNumber,
+            subscriptionId = request?.timeout ?: 0L,
+            idTokenCertificateHash = idTokenCertificateHash,
+            idTokenNonce = idTokenNonce,
+            callingPackage = idTokenCallingPackage,
+            imsiRequests = imsiRequests
+        )
+        Log.d(TAG, "CarrierInfo: phone_number=$phoneNumber, sub_id=${request?.timeout}, calling_package=$idTokenCallingPackage, imsi_requests=${imsiRequests.size}")
+
+        return ResolvedIdTokenCarrierInfo(
+            idTokenCertificateHash = idTokenCertificateHash,
+            idTokenNonce = idTokenNonce,
+            idTokenCallingPackage = idTokenCallingPackage,
+            carrierInfo = carrierInfo
         )
     }
 
