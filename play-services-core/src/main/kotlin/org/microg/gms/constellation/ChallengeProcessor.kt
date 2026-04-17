@@ -14,6 +14,7 @@ import android.telephony.SmsMessage
 import android.util.Log
 import google.internal.communications.phonedeviceverification.v1.*
 import java.util.concurrent.CompletableFuture
+import kotlin.coroutines.resume
 
 private const val TAG = "GmsConstellationChallenge"
 
@@ -78,6 +79,7 @@ object SmsInbox {
     }
 
     private fun extractSmsFromIntent(intent: Intent): OtpSmsResult? {
+        @Suppress("DEPRECATION")
         val pdus = intent.extras?.get("pdus") as? Array<*>
         if (pdus != null) {
             for (pdu in pdus) {
@@ -248,7 +250,7 @@ object ChallengeProcessor {
                                     sms_result_code = resultCode.toLong(),
                                     sms_error_code = errorCode.toLong()
                                 )
-                            )) {}
+                            ))
                         }
                     }
                 }
@@ -269,7 +271,7 @@ object ChallengeProcessor {
                     Log.e(TAG, "MO SMS send failed: ${e.message}")
                     try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
                     if (continuation.isActive) {
-                        continuation.resume(moFailedToSend()) {}
+                        continuation.resume(moFailedToSend())
                     }
                 }
             }

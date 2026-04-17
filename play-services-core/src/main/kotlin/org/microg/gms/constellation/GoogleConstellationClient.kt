@@ -215,6 +215,7 @@ class GoogleConstellationClient(private val context: Context) {
                 val checkinInfo = LastCheckinInfo.read(context)
                 if (checkinInfo.androidId != 0L && checkinInfo.securityToken != 0L) {
                     try {
+                        @Suppress("DEPRECATION")
                         val certSha1 = PackageUtils.firstSignatureDigest(context, packageName)
                         val versionCode = org.microg.gms.common.Constants.GMS_VERSION_CODE
                         val versionName = "%09d".format(versionCode).let {
@@ -363,6 +364,7 @@ class GoogleConstellationClient(private val context: Context) {
         return (try {
             // Get package info for headers
             val packageName = context.packageName
+            @Suppress("DEPRECATION")
             val certSha1 = PackageUtils.firstSignatureDigest(context, packageName)
             Log.d(TAG, "Using API key auth with package=$packageName, cert=$certSha1")
 
@@ -657,12 +659,20 @@ class GoogleConstellationClient(private val context: Context) {
                 // for silent SMS verification. The token goes into VerificationMethodData.value (hyzo.b).
                 val smsToken = try {
                     val smsSubId = subscriptionInfo?.subscriptionId ?: -1
-                    val smsManager = if (smsSubId != -1 && Build.VERSION.SDK_INT >= 22) {
+                    val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        context.getSystemService(android.telephony.SmsManager::class.java)
+                            ?.let { if (smsSubId > 0) it.createForSubscriptionId(smsSubId) else it }
+                    } else if (smsSubId != -1 && Build.VERSION.SDK_INT >= 22) {
+                        @Suppress("DEPRECATION")
                         android.telephony.SmsManager.getSmsManagerForSubscriptionId(smsSubId)
                     } else {
                         @Suppress("DEPRECATION")
                         android.telephony.SmsManager.getDefault()
                     }
+                    if (smsManager == null) {
+                        Log.w(TAG, "createAppSpecificSmsToken failed: SmsManager unavailable for subId=$smsSubId")
+                        ""
+                    } else {
                     val intent = android.content.Intent(ConstellationConstants.ACTION_SILENT_SMS_RECEIVED)
                         .setPackage(context.packageName)
                     // FLAG_MUTABLE is REQUIRED: createAppSpecificSmsToken fires PendingIntent via
@@ -674,6 +684,7 @@ class GoogleConstellationClient(private val context: Context) {
                         context, 0, intent, pendingIntentFlags
                     )
                     smsManager.createAppSpecificSmsToken(pendingIntent) ?: ""
+                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "createAppSpecificSmsToken failed: ${e.message}")
                     ""
