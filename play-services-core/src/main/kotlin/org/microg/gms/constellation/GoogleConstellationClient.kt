@@ -73,14 +73,12 @@ class GoogleConstellationClient(private val context: Context) {
     private data class ResolvedPhoneIdentity(
         val imsi: String,
         val msisdn: String,
-        val phoneNumber: String,
-        val telephonyMsisdn: String
+        val phoneNumber: String
     )
 
     private data class ResolvedDeviceIdentity(
         val deviceAndroidId: Long,
-        val userAndroidId: Long,
-        val deviceUserId: Long
+        val userAndroidId: Long
     )
 
     private data class ResolvedIdTokenCarrierInfo(
@@ -164,7 +162,7 @@ class GoogleConstellationClient(private val context: Context) {
             try {
                 // Generate or retrieve Instance ID key pair
                 var instanceId = prefs.getString("instance_id", null)
-                var keyPair: java.security.KeyPair? = null
+                val keyPair: java.security.KeyPair
 
                 if (instanceId == null) {
                     val rsaGenerator = java.security.KeyPairGenerator.getInstance("RSA")
@@ -202,7 +200,7 @@ class GoogleConstellationClient(private val context: Context) {
                 }
 
                 // Compute pub2 and sig for registration (matches InstanceIdRpc.sendRegisterMessage)
-                val pubKeyBase64 = android.util.Base64.encodeToString(keyPair!!.public.encoded,
+                val pubKeyBase64 = android.util.Base64.encodeToString(keyPair.public.encoded,
                     android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
                 val signaturePayload = (packageName + "\n" + pubKeyBase64).toByteArray(Charsets.UTF_8)
                 val sig = java.security.Signature.getInstance("SHA256withRSA")
@@ -417,7 +415,7 @@ class GoogleConstellationClient(private val context: Context) {
                     null
                 }
 
-                rpcClient = ConstellationRpcClient(
+                val rpc = ConstellationRpcClient(
                     context = context,
                     apiKey = API_KEY,
                     packageName = packageName,
@@ -425,17 +423,12 @@ class GoogleConstellationClient(private val context: Context) {
                     spatulaHeader = spatulaHeader,
                     iidHash = iidHash
                 )
-                val rpc = rpcClient!!  // Non-null local ref for use within this try block
+                rpcClient = rpc
 
                 val keyPrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
                 val keyMaterial = loadOrCreateKeyMaterial(keyPrefs)
                 val publicKeyBytes = keyMaterial.publicKeyBytes
                 val privateKey = keyMaterial.privateKey
-
-                val publicKeyBase64 = android.util.Base64.encodeToString(
-                    publicKeyBytes.toByteArray(),
-                    android.util.Base64.NO_WRAP
-                )
 
                 // Check if server has acknowledged our public key (GMS bbah.java:1163)
                 // If true, we need to sign requests with client_credentials
@@ -486,7 +479,6 @@ class GoogleConstellationClient(private val context: Context) {
                 val td = gatherTelephonyData(context, targetImsi, targetMsisdn)
                 val subscriptionInfo = td.subscriptionInfo
                 val telephonyManagerSub = td.telephonyManagerSub
-                val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
                 val subId = td.subId
                 val simCountry = td.simCountry
                 val networkCountry = td.networkCountry
@@ -541,7 +533,6 @@ class GoogleConstellationClient(private val context: Context) {
                 val imsi = phoneIdentity.imsi
                 val msisdn = phoneIdentity.msisdn
                 val phoneNumber = phoneIdentity.phoneNumber
-                val telephonyMsisdn = phoneIdentity.telephonyMsisdn
 
                 // Stock GMS V2 (bevr.java:132,142) clones caller extras bundle, adds calling_api.
                 // V1 (bevr.java:259) also adds calling_package, but Messages uses V2.
@@ -621,7 +612,6 @@ class GoogleConstellationClient(private val context: Context) {
                 val deviceIdentity = resolveDeviceIdentity()
                 val deviceAndroidId = deviceIdentity.deviceAndroidId
                 val userAndroidId = deviceIdentity.userAndroidId
-                val deviceUserId = deviceIdentity.deviceUserId
 
                 // Common proto context shared across all request builders in this call
                 val protoCtx = RequestProtoContext(
@@ -666,9 +656,9 @@ class GoogleConstellationClient(private val context: Context) {
                 // Stock GMS populates this via SmsManager.createAppSpecificSmsToken() (bfrb.java:66)
                 // for silent SMS verification. The token goes into VerificationMethodData.value (hyzo.b).
                 val smsToken = try {
-                    val subId = subscriptionInfo?.subscriptionId ?: -1
-                    val smsManager = if (subId != -1 && Build.VERSION.SDK_INT >= 22) {
-                        android.telephony.SmsManager.getSmsManagerForSubscriptionId(subId)
+                    val smsSubId = subscriptionInfo?.subscriptionId ?: -1
+                    val smsManager = if (smsSubId != -1 && Build.VERSION.SDK_INT >= 22) {
+                        android.telephony.SmsManager.getSmsManagerForSubscriptionId(smsSubId)
                     } else {
                         @Suppress("DEPRECATION")
                         android.telephony.SmsManager.getDefault()
@@ -705,7 +695,7 @@ class GoogleConstellationClient(private val context: Context) {
                     verificationMethodInfo = verificationMethodInfo,
                     carrierInfo = carrierInfo
                 )
-                val request = buildSyncRequest(
+                val syncRequest = buildSyncRequest(
                     sessionId = sessionId,
                     ctx = protoCtx,
                     syncToken = syncToken,
@@ -820,9 +810,10 @@ class GoogleConstellationClient(private val context: Context) {
 
                                     val retryDg = retryResponse.droidguard_token_response
                                     if (retryDg != null && !retryDg.droidguard_token.isNullOrEmpty()) {
+                                        val retryArfbToken = retryDg.droidguard_token
                                         val ttl = try { retryDg.droidguard_token_ttl?.toEpochMilli() ?: 0L } catch (_: Exception) { 0L }
-                                        rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("getConsent"), retryDg.droidguard_token!!, ttl, iidToken)
-                                        Log.i(TAG, "  ARfb cached from retry! ${retryDg.droidguard_token!!.length} chars")
+                                        rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("getConsent"), retryArfbToken, ttl, iidToken)
+                                        Log.i(TAG, "  ARfb cached from retry! ${retryArfbToken.length} chars")
                                     } else {
                                         Log.w(TAG, "  No ARfb in retry response - Sync will use raw DG token")
                                     }
@@ -872,7 +863,7 @@ class GoogleConstellationClient(private val context: Context) {
                 val MAX_SYNC_ATTEMPTS = 3
                 val SYNC_RETRY_DELAY_MS = 45_000L  // 45s between retries (stock GMS observed ~43s)
 
-                var currentSyncRequest = request
+                var currentSyncRequest = syncRequest
                 var syncRetryResponse: SyncResponse? = null
 
                 for (syncAttempt in 1..MAX_SYNC_ATTEMPTS) {
@@ -988,13 +979,13 @@ class GoogleConstellationClient(private val context: Context) {
                 var hasNone = false
 
                 for (verificationResponse in responses) {
-                    val verification = verificationResponse.verification
-                    val state = verification?.state
-                    val simInfo = verification?.association?.sim?.sim_info
-                    val imsi = simInfo?.imsi?.firstOrNull() ?: ""
-                    val msisdn = simInfo?.sim_readable_number ?: ""
+                    val responseVerification = verificationResponse.verification
+                    val state = responseVerification?.state
+                    val responseSimInfo = responseVerification?.association?.sim?.sim_info
+                    val responseImsi = responseSimInfo?.imsi?.firstOrNull() ?: ""
+                    val responseMsisdn = responseSimInfo?.sim_readable_number ?: ""
 
-                    Log.d(TAG, "VerificationResponse: state=$state, imsi=${if (imsi.isNotEmpty()) "***${imsi.takeLast(4)}" else "empty"}, msisdn=${if (msisdn.isNotEmpty()) "***${msisdn.takeLast(4)}" else "empty"}")
+                    Log.d(TAG, "VerificationResponse: state=$state, imsi=${if (responseImsi.isNotEmpty()) "***${responseImsi.takeLast(4)}" else "empty"}, msisdn=${if (responseMsisdn.isNotEmpty()) "***${responseMsisdn.takeLast(4)}" else "empty"}")
 
                     when (state) {
                         VerificationState.VERIFICATION_STATE_VERIFIED -> {
@@ -1192,7 +1183,7 @@ class GoogleConstellationClient(private val context: Context) {
                                 } else {
                                     // Subsequent rounds with same MO_SMS: polling - server checks if SMS arrived.
                                     // polling_intervals is comma-separated ms values (e.g., "4000,1000,1000,3000,5000")
-                                    val pollDelays = moChallenge.polling_intervals?.split(",")?.mapNotNull { it.trim().toLongOrNull() } ?: emptyList()
+                                    val pollDelays = moChallenge.polling_intervals.split(",").mapNotNull { it.trim().toLongOrNull() }
                                     val pollIndex = (round - 2).coerceAtLeast(0)  // round 1 = send, round 2+ = poll
                                     val pollDelay = pollDelays.getOrElse(pollIndex) { pollDelays.lastOrNull() ?: 5000L }
                                     Log.i(TAG, "  MO_SMS: polling round (SMS already sent), waiting ${pollDelay}ms")
@@ -1265,22 +1256,23 @@ class GoogleConstellationClient(private val context: Context) {
 
                         Log.i(TAG, "Round $round: calling Proceed (challenge_id=$challengeId)")
 
-                        var proceedResponse: google.internal.communications.phonedeviceverification.v1.ProceedResponse? = null
                         // No-DG-first strategy
                         val noDgRequest = proceedRequest.copy(
                             header_ = proceedHeader.copy(
                                 client_info = proceedHeader.client_info?.copy(device_signals = DeviceSignals())
                             )
                         )
-                        try {
-                            proceedResponse = rpc.proceed(noDgRequest)
+                        val proceedResponse = try {
+                            val proceedNoDgResponse = rpc.proceed(noDgRequest)
                             Log.i(TAG, "Round $round: Proceed SUCCESS (no-DG)")
+                            proceedNoDgResponse
                         } catch (e: Exception) {
                             if (e is com.squareup.wire.GrpcException && proceedDgToken != null) {
                                 Log.w(TAG, "Round $round: Proceed no-DG failed (${e.grpcStatus.name}), retrying with DG")
                                 try {
-                                    proceedResponse = rpc.proceed(proceedRequest)
+                                    val proceedWithDgResponse = rpc.proceed(proceedRequest)
                                     Log.i(TAG, "Round $round: Proceed SUCCESS (with DG)")
+                                    proceedWithDgResponse
                                 } catch (e2: Exception) {
                                     Log.e(TAG, "Round $round: Proceed with DG also failed: ${e2.message}")
                                     return@runBlocking Ts43Client.EntitlementResult.error("proceed-failed-round-$round", e2)
@@ -1292,14 +1284,14 @@ class GoogleConstellationClient(private val context: Context) {
                         }
 
                         // Cache DG token from response
-                        proceedResponse?.droidguard_token_response?.let { dgResp ->
+                        proceedResponse.droidguard_token_response?.let { dgResp ->
                             if (!dgResp.droidguard_token.isNullOrEmpty()) {
                                 rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("proceed"), dgResp.droidguard_token, dgResp.droidguard_token_ttl?.toEpochMilli() ?: 0L, iidToken)
                             }
                         }
 
                         // Check outcome
-                        val newVerification = proceedResponse?.verification
+                        val newVerification = proceedResponse.verification
                         val newState = newVerification?.state
                         Log.i(TAG, "Round $round: post-Proceed state=$newState")
 
@@ -1572,12 +1564,7 @@ class GoogleConstellationClient(private val context: Context) {
             Log.w(TAG, "MSISDN '$msisdn' missing + prefix (not E.164)")
         }
 
-        return ResolvedPhoneIdentity(
-            imsi = imsi,
-            msisdn = msisdn,
-            phoneNumber = phoneNumber,
-            telephonyMsisdn = telephonyMsisdn
-        )
+        return ResolvedPhoneIdentity(imsi = imsi, msisdn = msisdn, phoneNumber = phoneNumber)
     }
 
     private fun resolveDeviceIdentity(): ResolvedDeviceIdentity {
@@ -1624,11 +1611,7 @@ class GoogleConstellationClient(private val context: Context) {
 
         Log.d(TAG, "Android IDs: device=$deviceAndroidId, deviceUser=$deviceUserId, userAndroid=$userAndroidId (settings=$androidIdFromSettings)")
 
-        return ResolvedDeviceIdentity(
-            deviceAndroidId = deviceAndroidId,
-            userAndroidId = userAndroidId,
-            deviceUserId = deviceUserId
-        )
+        return ResolvedDeviceIdentity(deviceAndroidId = deviceAndroidId, userAndroidId = userAndroidId)
     }
 
     private fun resolveIdTokenCarrierInfo(
@@ -1758,7 +1741,7 @@ class GoogleConstellationClient(private val context: Context) {
 
         val payload = decodeJwtPayloadJson(jwt)
         val iss = payload?.optString("iss")
-        val expSec = payload?.optLong("exp")?.takeIf { it != null && it > 0 } ?: 0L
+        val expSec = payload?.optLong("exp")?.takeIf { it > 0 } ?: 0L
         val expDate = if (expSec > 0) java.util.Date(expSec * 1000L).toString() else "?"
         val phoneClaim = payload?.optString("phone_number")
         val phoneSuffix = phoneClaim?.takeLast(4)
