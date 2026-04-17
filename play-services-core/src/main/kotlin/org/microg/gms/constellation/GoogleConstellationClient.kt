@@ -77,6 +77,12 @@ class GoogleConstellationClient(private val context: Context) {
         val telephonyMsisdn: String
     )
 
+    private data class ResolvedDeviceIdentity(
+        val deviceAndroidId: Long,
+        val userAndroidId: Long,
+        val deviceUserId: Long
+    )
+
     companion object {
         private const val TAG = "GmsConstellationClient"
         // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
@@ -620,57 +626,10 @@ class GoogleConstellationClient(private val context: Context) {
                 )
                 Log.d(TAG, "CarrierInfo: phone_number=$phoneNumber, sub_id=${request?.timeout}, calling_package=$idTokenCallingPackage, imsi_requests=${imsiRequests.size}")
 
-                // Get Android IDs for DeviceId (GMS bejs.java:93-126)
-                // Settings.Secure.ANDROID_ID is per-app/per-signing-key on Android 8+.
-                // microG's value differs from checkin android_id → server cross-validates with DG token → mismatch = rejected.
-                // Stock GMS uses its own android_id which matches checkin. We must use checkin android_id for consistency.
-                val checkinAndroidId = org.microg.gms.checkin.LastCheckinInfo.read(context).androidId
-                val androidIdStr = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-                val androidIdFromSettings = if (checkinAndroidId != 0L) {
-                    Log.i(TAG, "Using checkin androidId ($checkinAndroidId) instead of Settings.Secure.ANDROID_ID for DG consistency")
-                    checkinAndroidId
-                } else {
-                    Log.w(TAG, "Checkin androidId=0, falling back to Settings.Secure.ANDROID_ID")
-                    try { java.lang.Long.parseUnsignedLong(androidIdStr, 16) } catch (e: Exception) { 0L }
-                }
-
-                // device_user_id = UserManager.getSerialNumberForUser() (GMS bejs.java:56-60)
-                val userManager = context.getSystemService(Context.USER_SERVICE) as? android.os.UserManager
-                val deviceUserId = try {
-                    val serial = userManager?.getSerialNumberForUser(android.os.Process.myUserHandle())
-                    Log.d(TAG, "UserManager.getSerialNumberForUser() = $serial")
-                    serial ?: 0L
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to get user serial number", e)
-                    0L
-                }
-
-                // device_android_id = SharedPreferences "primary_device_id" with fallback (GMS bejs.java:116-123, beob.java:57-59)
-                // For new clients: primary_device_id=0, then if flag.l() && isSystemUser() && 0==0, falls back to user_android_id
-                val devicePrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
-                val primaryDeviceId = devicePrefs.getLong("primary_device_id", 0L)
-
-                // user_android_id = Settings.Secure.ANDROID_ID (GMS bejs.java:42-54, bdzc.d)
-                // CRITICAL: In stock GMS, user_android_id == device_android_id (both come from same ANDROID_ID).
-                // After stock→microG swap, Settings.Secure.ANDROID_ID may differ (per-signing-key on Android 8+).
-                // When primary_device_id is preserved from stock, use it for BOTH to maintain consistency.
-                val userAndroidId = if (primaryDeviceId != 0L) {
-                    Log.d(TAG, "Using primary_device_id ($primaryDeviceId) for user_android_id (Settings.Secure.ANDROID_ID=$androidIdFromSettings)")
-                    primaryDeviceId
-                } else {
-                    androidIdFromSettings
-                }
-
-                var deviceAndroidId = primaryDeviceId
-                if (deviceAndroidId == 0L) {
-                    // Fallback logic: if system user and primary_device_id not set, use user_android_id
-                    val isSystemUser = userManager?.isSystemUser ?: true
-                    if (isSystemUser) {
-                        deviceAndroidId = userAndroidId
-                    }
-                }
-
-                Log.d(TAG, "Android IDs: device=$deviceAndroidId, deviceUser=$deviceUserId, userAndroid=$userAndroidId (settings=${androidIdFromSettings})")
+                val deviceIdentity = resolveDeviceIdentity()
+                val deviceAndroidId = deviceIdentity.deviceAndroidId
+                val userAndroidId = deviceIdentity.userAndroidId
+                val deviceUserId = deviceIdentity.deviceUserId
 
                 // Common proto context shared across all request builders in this call
                 val protoCtx = RequestProtoContext(
@@ -1626,6 +1585,57 @@ class GoogleConstellationClient(private val context: Context) {
             msisdn = msisdn,
             phoneNumber = phoneNumber,
             telephonyMsisdn = telephonyMsisdn
+        )
+    }
+
+    private fun resolveDeviceIdentity(): ResolvedDeviceIdentity {
+        val checkinAndroidId = LastCheckinInfo.read(context).androidId
+        val androidIdStr = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        val androidIdFromSettings = if (checkinAndroidId != 0L) {
+            Log.i(TAG, "Using checkin androidId ($checkinAndroidId) instead of Settings.Secure.ANDROID_ID for DG consistency")
+            checkinAndroidId
+        } else {
+            Log.w(TAG, "Checkin androidId=0, falling back to Settings.Secure.ANDROID_ID")
+            try {
+                java.lang.Long.parseUnsignedLong(androidIdStr, 16)
+            } catch (e: Exception) {
+                0L
+            }
+        }
+
+        val userManager = context.getSystemService(Context.USER_SERVICE) as? android.os.UserManager
+        val deviceUserId = try {
+            val serial = userManager?.getSerialNumberForUser(android.os.Process.myUserHandle())
+            Log.d(TAG, "UserManager.getSerialNumberForUser() = $serial")
+            serial ?: 0L
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get user serial number", e)
+            0L
+        }
+
+        val devicePrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
+        val primaryDeviceId = devicePrefs.getLong("primary_device_id", 0L)
+        val userAndroidId = if (primaryDeviceId != 0L) {
+            Log.d(TAG, "Using primary_device_id ($primaryDeviceId) for user_android_id (Settings.Secure.ANDROID_ID=$androidIdFromSettings)")
+            primaryDeviceId
+        } else {
+            androidIdFromSettings
+        }
+
+        var deviceAndroidId = primaryDeviceId
+        if (deviceAndroidId == 0L) {
+            val isSystemUser = userManager?.isSystemUser ?: true
+            if (isSystemUser) {
+                deviceAndroidId = userAndroidId
+            }
+        }
+
+        Log.d(TAG, "Android IDs: device=$deviceAndroidId, deviceUser=$deviceUserId, userAndroid=$userAndroidId (settings=$androidIdFromSettings)")
+
+        return ResolvedDeviceIdentity(
+            deviceAndroidId = deviceAndroidId,
+            userAndroidId = userAndroidId,
+            deviceUserId = deviceUserId
         )
     }
 
