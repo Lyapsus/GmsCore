@@ -70,6 +70,13 @@ class GoogleConstellationClient(private val context: Context) {
         val isPublicKeyAcked: Boolean
     )
 
+    private data class ResolvedPhoneIdentity(
+        val imsi: String,
+        val msisdn: String,
+        val phoneNumber: String,
+        val telephonyMsisdn: String
+    )
+
     companion object {
         private const val TAG = "GmsConstellationClient"
         // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
@@ -509,51 +516,19 @@ class GoogleConstellationClient(private val context: Context) {
                 val telephonyInfoContainer = buildTelephonyInfoContainer(gaiaIdsList)
                 Log.d(TAG, "TelephonyInfoContainer: ${gaiaIdsList.size} Gaia IDs")
 
-                val requestImsi = request?.imsiRequests?.firstOrNull()?.imsi
-                val requestMsisdn = request?.imsiRequests?.firstOrNull()?.msisdn
-                // Fallback to TelephonyManager if IMSI not provided in request/override
-                // Use subscription-specific telephonyManagerSub, NOT a new default TelephonyManager.
-                // Default TM reads wrong SIM on dual-SIM.
-                val telephonyImsi = try {
-                    telephonyManagerSub?.subscriberId ?: ""
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "Cannot read IMSI (no READ_PHONE_STATE permission): ${e.message}")
-                    ""
-                }
-                val imsi = requestImsi ?: imsiOverride ?: telephonyImsi
-                // MSISDN resolution: use SubscriptionInfo.number (reliable per-SIM) NOT
-                // getLine1Number() which returns wrong SIM's number on Samsung dual-SIM.
-                val subscriptionMsisdn = try {
-                    @Suppress("DEPRECATION")
-                    subscriptionInfo?.number?.takeIf { it.isNotEmpty() } ?: ""
-                } catch (e: Exception) { "" }
-                val telephonyMsisdn = if (subscriptionMsisdn.isNotEmpty()) {
-                    subscriptionMsisdn
-                } else {
-                    // SubscriptionInfo has no number - SIM truly has no stored number.
-                    // Do NOT fall back to getLine1Number() - Samsung returns wrong SIM's number.
-                    Log.d(TAG, "SIM subId=$subId has no stored number (SubscriptionInfo.number empty)")
-                    ""
-                }
-                val msisdn = requestMsisdn?.takeIf { it.isNotEmpty() }
-                    ?: msisdnOverride?.takeIf { it.isNotEmpty() && it.startsWith("+") }
-                    ?: requestedNumber?.takeIf { it.isNotEmpty() && it.startsWith("+") }
-                    ?: telephonyMsisdn.takeIf { it.isNotEmpty() }
-                    ?: ""
-                val phoneNumber = request?.policyId ?: msisdn
-                Log.i(TAG, "IMSI/MSISDN resolution: imsi=${if (imsi.isNotEmpty()) "${imsi.take(5)}..." else "EMPTY"} (src=${when { requestImsi != null -> "AIDL"; imsiOverride != null -> "override"; telephonyImsi.isNotEmpty() -> "TelephonyManager(sub=$subId)"; else -> "NONE" }}), msisdn=${if (msisdn.isNotEmpty()) "${msisdn.take(5)}..." else "EMPTY"}")
-
-                // Pre-flight: warn on MSISDN/IMSI mismatches across sources
-                val allMsisdnSources = mutableMapOf<String, String>()
-                if (!requestMsisdn.isNullOrEmpty()) allMsisdnSources["AIDL"] = requestMsisdn
-                if (!msisdnOverride.isNullOrEmpty()) allMsisdnSources["override"] = msisdnOverride
-                if (telephonyMsisdn.isNotEmpty()) allMsisdnSources["SIM"] = telephonyMsisdn
-                if (allMsisdnSources.values.toSet().size > 1) {
-                    Log.w(TAG, "MSISDN MISMATCH: ${allMsisdnSources.entries.joinToString { "${it.key}=${it.value}" }}, using: $msisdn")
-                }
-                if (msisdn.isNotEmpty() && !msisdn.startsWith("+")) {
-                    Log.w(TAG, "MSISDN '$msisdn' missing + prefix (not E.164)")
-                }
+                val phoneIdentity = resolvePhoneIdentity(
+                    request = request,
+                    requestedNumber = requestedNumber,
+                    imsiOverride = imsiOverride,
+                    msisdnOverride = msisdnOverride,
+                    telephonyManagerSub = telephonyManagerSub,
+                    subscriptionInfo = subscriptionInfo,
+                    subId = subId
+                )
+                val imsi = phoneIdentity.imsi
+                val msisdn = phoneIdentity.msisdn
+                val phoneNumber = phoneIdentity.phoneNumber
+                val telephonyMsisdn = phoneIdentity.telephonyMsisdn
 
                 // Stock GMS V2 (bevr.java:132,142) clones caller extras bundle, adds calling_api.
                 // V1 (bevr.java:259) also adds calling_package, but Messages uses V2.
@@ -1592,6 +1567,66 @@ class GoogleConstellationClient(private val context: Context) {
             .apply()
         Log.d(TAG, "Generated and stored new key pair (public: ${publicEncoded.size} bytes, private: ${privateEncoded.size} bytes)")
         return Pair(ByteString.of(*publicEncoded), keyPair.private)
+    }
+
+    private fun resolvePhoneIdentity(
+        request: AidlVerifyPhoneNumberRequest?,
+        requestedNumber: String?,
+        imsiOverride: String?,
+        msisdnOverride: String?,
+        telephonyManagerSub: TelephonyManager?,
+        subscriptionInfo: android.telephony.SubscriptionInfo?,
+        subId: Int
+    ): ResolvedPhoneIdentity {
+        val requestImsi = request?.imsiRequests?.firstOrNull()?.imsi
+        val requestMsisdn = request?.imsiRequests?.firstOrNull()?.msisdn
+        val telephonyImsi = try {
+            telephonyManagerSub?.subscriberId ?: ""
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Cannot read IMSI (no READ_PHONE_STATE permission): ${e.message}")
+            ""
+        }
+        val imsi = requestImsi ?: imsiOverride ?: telephonyImsi
+
+        val subscriptionMsisdn = try {
+            @Suppress("DEPRECATION")
+            subscriptionInfo?.number?.takeIf { it.isNotEmpty() } ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+        val telephonyMsisdn = if (subscriptionMsisdn.isNotEmpty()) {
+            subscriptionMsisdn
+        } else {
+            Log.d(TAG, "SIM subId=$subId has no stored number (SubscriptionInfo.number empty)")
+            ""
+        }
+
+        val msisdn = requestMsisdn?.takeIf { it.isNotEmpty() }
+            ?: msisdnOverride?.takeIf { it.isNotEmpty() && it.startsWith("+") }
+            ?: requestedNumber?.takeIf { it.isNotEmpty() && it.startsWith("+") }
+            ?: telephonyMsisdn.takeIf { it.isNotEmpty() }
+            ?: ""
+        val phoneNumber = request?.policyId ?: msisdn
+
+        Log.i(TAG, "IMSI/MSISDN resolution: imsi=${if (imsi.isNotEmpty()) "${imsi.take(5)}..." else "EMPTY"} (src=${when { requestImsi != null -> "AIDL"; imsiOverride != null -> "override"; telephonyImsi.isNotEmpty() -> "TelephonyManager(sub=$subId)"; else -> "NONE" }}), msisdn=${if (msisdn.isNotEmpty()) "${msisdn.take(5)}..." else "EMPTY"}")
+
+        val allMsisdnSources = mutableMapOf<String, String>()
+        if (!requestMsisdn.isNullOrEmpty()) allMsisdnSources["AIDL"] = requestMsisdn
+        if (!msisdnOverride.isNullOrEmpty()) allMsisdnSources["override"] = msisdnOverride
+        if (telephonyMsisdn.isNotEmpty()) allMsisdnSources["SIM"] = telephonyMsisdn
+        if (allMsisdnSources.values.toSet().size > 1) {
+            Log.w(TAG, "MSISDN MISMATCH: ${allMsisdnSources.entries.joinToString { "${it.key}=${it.value}" }}, using: $msisdn")
+        }
+        if (msisdn.isNotEmpty() && !msisdn.startsWith("+")) {
+            Log.w(TAG, "MSISDN '$msisdn' missing + prefix (not E.164)")
+        }
+
+        return ResolvedPhoneIdentity(
+            imsi = imsi,
+            msisdn = msisdn,
+            phoneNumber = phoneNumber,
+            telephonyMsisdn = telephonyMsisdn
+        )
     }
 
     private fun createIidTokenAuth(
