@@ -419,45 +419,6 @@ class GoogleConstellationClient(private val context: Context) {
                 // If true, we need to sign requests with client_credentials
                 val isPublicKeyAcked = keyMaterial.isPublicKeyAcked
                 Log.d(TAG, "is_public_key_acked: $isPublicKeyAcked")
-
-
-                // Helper to create ClientCredentials with signature (GMS bekg.java:1166-1198, bekf.java:92)
-                // Signature string format: {iid_token}:{seconds}:{nanos} (GMS bbah.java:1178)
-                // Signed with SHA256withECDSA using the persisted private key
-                fun createClientCredentials(iidTokenForSig: String, deviceIdForCreds: DeviceId, force: Boolean = false): ClientCredentials? {
-                    if ((!isPublicKeyAcked && !force) || privateKey == null) {
-                        return null
-                    }
-                    try {
-                        val nowMillis = System.currentTimeMillis()
-                        val seconds = nowMillis / 1000
-                        val nanos = ((nowMillis % 1000) * 1000000).toInt()
-
-                        // Build signing string: {iid_token}:{seconds}:{nanos}
-                        val signingString = "$iidTokenForSig:$seconds:$nanos"
-                        Log.d(TAG, "Signing string: $signingString")
-
-                        // Sign with SHA256withECDSA
-                        val signature = java.security.Signature.getInstance("SHA256withECDSA")
-                        signature.initSign(privateKey)
-                        signature.update(signingString.toByteArray(Charsets.UTF_8))
-                        val signatureBytes = signature.sign()
-                        Log.d(TAG, "Generated signature (${signatureBytes.size} bytes)")
-
-                        return ClientCredentials(
-                            device_id = deviceIdForCreds,
-                            client_signature = ByteString.of(*signatureBytes),
-                            metadata = CredentialMetadata(
-                                timestamp_nanos = seconds,  // Actually seconds despite name (GMS hnnk.b)
-                                nonce = nanos               // Actually nanos (GMS hnnk.c)
-                            )
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to create client credentials", e)
-                        return null
-                    }
-                }
-
                 // 6-8. Gather telephony data and build proto objects
                 val targetImsi = request?.imsiRequests?.firstOrNull()?.imsi
                 val targetMsisdn = request?.imsiRequests?.firstOrNull()?.msisdn
@@ -640,7 +601,12 @@ class GoogleConstellationClient(private val context: Context) {
                 // Stock GMS only includes credentials when is_public_key_acked=true.
                 // First Sync: no credentials → server acks key → CLIENT_KEY_UPDATED.
                 // Subsequent Syncs: credentials included with ECDSA signature.
-                val syncClientCredentials = createClientCredentials(iidToken, syncDeviceId)
+                val syncClientCredentials = createClientCredentials(
+                    iidTokenForSig = iidToken,
+                    deviceIdForCreds = syncDeviceId,
+                    privateKey = privateKey,
+                    isPublicKeyAcked = isPublicKeyAcked,
+                )
                 if (syncClientCredentials != null) {
                     Log.d(TAG, "Including client_credentials in Sync request (forced)")
                 }
@@ -711,8 +677,13 @@ class GoogleConstellationClient(private val context: Context) {
                     device_android_id = deviceAndroidId,
                     user_android_id = userAndroidId,
                 )
-                val proceedClientCredentials = createClientCredentials(iidToken, proceedDeviceId)
-                callContext = ConstellationCallContext(
+                val proceedClientCredentials = createClientCredentials(
+                    iidTokenForSig = iidToken,
+                    deviceIdForCreds = proceedDeviceId,
+                    privateKey = privateKey,
+                    isPublicKeyAcked = isPublicKeyAcked,
+                )
+                callContext = prepareConstellationCall(
                     rpc = rpc,
                     keyPrefs = keyPrefs,
                     iidToken = iidToken,
@@ -1159,6 +1130,79 @@ class GoogleConstellationClient(private val context: Context) {
             idTokenCallingPackage = idTokenCallingPackage,
             carrierInfo = carrierInfo
         )
+    }
+
+    private fun prepareConstellationCall(
+        rpc: ConstellationRpcClient,
+        keyPrefs: android.content.SharedPreferences,
+        iidToken: String,
+        sessionId: String,
+        subId: Int,
+        imsi: String,
+        phoneNumber: String,
+        deviceAndroidId: Long,
+        userAndroidId: Long,
+        registeredAppIds: List<StringId>,
+        params: List<Param>,
+        protoCtx: RequestProtoContext,
+        gpnvRequestContext: GpnvRequestContext,
+        syncRequest: SyncRequest,
+        proceedClientCredentials: ClientCredentials?,
+    ): ConstellationCallContext {
+        return ConstellationCallContext(
+            rpc = rpc,
+            keyPrefs = keyPrefs,
+            iidToken = iidToken,
+            sessionId = sessionId,
+            subId = subId,
+            imsi = imsi,
+            phoneNumber = phoneNumber,
+            deviceAndroidId = deviceAndroidId,
+            userAndroidId = userAndroidId,
+            registeredAppIds = registeredAppIds,
+            params = params,
+            protoCtx = protoCtx,
+            gpnvRequestContext = gpnvRequestContext,
+            syncRequest = syncRequest,
+            proceedClientCredentials = proceedClientCredentials,
+        )
+    }
+
+    private fun createClientCredentials(
+        iidTokenForSig: String,
+        deviceIdForCreds: DeviceId,
+        privateKey: java.security.PrivateKey?,
+        isPublicKeyAcked: Boolean,
+        force: Boolean = false,
+    ): ClientCredentials? {
+        if ((!isPublicKeyAcked && !force) || privateKey == null) {
+            return null
+        }
+        return try {
+            val nowMillis = System.currentTimeMillis()
+            val seconds = nowMillis / 1000
+            val nanos = ((nowMillis % 1000) * 1000000).toInt()
+            val signingString = "$iidTokenForSig:$seconds:$nanos"
+            Log.d(TAG, "Signing string: $signingString")
+
+            val signature = java.security.Signature.getInstance("SHA256withECDSA")
+            signature.initSign(privateKey)
+            signature.update(signingString.toByteArray(Charsets.UTF_8))
+            val signatureBytes = signature.sign()
+            Log.d(TAG, "Generated signature (${signatureBytes.size} bytes)")
+
+            ClientCredentials(
+                device_id = deviceIdForCreds,
+                client_signature = ByteString.of(*signatureBytes),
+                metadata = CredentialMetadata(
+                    timestamp_nanos = seconds,
+                    nonce = nanos,
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create client credentials", e)
+            null
+        }
     }
 
 }
