@@ -16,9 +16,7 @@ import org.microg.gms.gcm.RegisterResponse
 import android.telephony.TelephonyManager
 import android.util.Log
 import org.microg.gms.common.Constants
-import java.io.File
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.delay
 import okio.ByteString
 import org.microg.gms.common.PackageUtils
 import org.microg.gms.auth.AuthConstants
@@ -32,29 +30,21 @@ import kotlinx.coroutines.withContext
 import google.internal.communications.phonedeviceverification.v1.ClientInfo
 import google.internal.communications.phonedeviceverification.v1.CountryInfo
 import google.internal.communications.phonedeviceverification.v1.DeviceId
-import google.internal.communications.phonedeviceverification.v1.DeviceSignals
 import google.internal.communications.phonedeviceverification.v1.SIMAssociation
 import google.internal.communications.phonedeviceverification.v1.StringId
 import google.internal.communications.phonedeviceverification.v1.IMSIRequest
 import google.internal.communications.phonedeviceverification.v1.Param
 import google.internal.communications.phonedeviceverification.v1.SyncRequest
-import google.internal.communications.phonedeviceverification.v1.SyncResponse
 import google.internal.communications.phonedeviceverification.v1.Verification
-import google.internal.communications.phonedeviceverification.v1.VerificationState
 import google.internal.communications.phonedeviceverification.v1.VerificationMethodInfo
 import google.internal.communications.phonedeviceverification.v1.VerificationMethodData
 import google.internal.communications.phonedeviceverification.v1.TelephonyInfo
 import google.internal.communications.phonedeviceverification.v1.TelephonyInfoContainer
 import google.internal.communications.phonedeviceverification.v1.ClientCredentials
-import google.internal.communications.phonedeviceverification.v1.PublicKeyStatus
 import google.internal.communications.phonedeviceverification.v1.CredentialMetadata
 import google.internal.communications.phonedeviceverification.v1.CarrierInfo
 import google.internal.communications.phonedeviceverification.v1.IdTokenRequest
 import com.google.android.gms.constellation.VerifyPhoneNumberRequest as AidlVerifyPhoneNumberRequest
-import google.internal.communications.phonedeviceverification.v1.ProceedRequest
-import google.internal.communications.phonedeviceverification.v1.ChallengeResponse
-import google.internal.communications.phonedeviceverification.v1.MTChallengeResponse
-import google.internal.communications.phonedeviceverification.v1.ProceedResponse
 
 class GoogleConstellationClient(private val context: Context) {
     private data class ConstellationKeyMaterial(
@@ -719,162 +709,23 @@ class GoogleConstellationClient(private val context: Context) {
                 SmsInbox.prepare(context)
 
                 try {
-
-                // Execute Sync with retry on PERMISSION_DENIED
-                // Stock GMS retries transient PERMISSION_DENIED ~43s later.
-                val MAX_SYNC_ATTEMPTS = 3
-                val SYNC_RETRY_DELAY_MS = 45_000L  // 45s between retries (stock GMS observed ~43s)
-
-                var currentSyncRequest = syncRequest
-                var syncRetryResponse: SyncResponse? = null
-
-                for (syncAttempt in 1..MAX_SYNC_ATTEMPTS) {
-                    Log.d(TAG, "Sending Sync request (attempt $syncAttempt/$MAX_SYNC_ATTEMPTS)...")
-                    val requestByteArray = SyncRequest.ADAPTER.encode(currentSyncRequest)
-                    Log.d(TAG, "SyncRequest size: ${requestByteArray.size} bytes")
-
-                    try {
-                        syncRetryResponse = rpc.sync(currentSyncRequest)
-                        Log.i(TAG, "Sync SUCCESS on attempt $syncAttempt/$MAX_SYNC_ATTEMPTS")
-                        break
-                    } catch (retryEx: Exception) {
-                        val isPermissionDenied = retryEx is com.squareup.wire.GrpcException &&
-                            retryEx.grpcStatus.code == 7
-
-                        if (isPermissionDenied && syncAttempt < MAX_SYNC_ATTEMPTS) {
-                            // On first PERMISSION_DENIED, retry WITHOUT DG to get NONE/PENDING state
-                            // On second PERMISSION_DENIED, retry WITH fresh DG after delay
-                            if (syncAttempt == 1) {
-                                Log.w(TAG, "Sync PERMISSION_DENIED (attempt 1/$MAX_SYNC_ATTEMPTS), retrying WITHOUT DG...")
-                                currentSyncRequest = rebuildSyncRequestWithDg(currentSyncRequest, null)
-                                continue
-                            }
-                            Log.w(TAG, "Sync PERMISSION_DENIED (attempt $syncAttempt/$MAX_SYNC_ATTEMPTS), retrying with fresh DG in ${SYNC_RETRY_DELAY_MS / 1000}s...")
-                            // Clear DG cache + key ack before retry
-                            rpc.clearDroidGuardTokenCache(rpc.resolveDroidGuardFlow("sync"), "Sync PERMISSION_DENIED retry $syncAttempt")
-                            keyPrefs.edit().putBoolean("is_public_key_acked", false).apply()
-
-                            delay(SYNC_RETRY_DELAY_MS)
-
-                            // Refresh DG token for next attempt
-                            val freshSyncToken = rpc.getDroidGuardToken("sync", iidToken)
-                            if (freshSyncToken == null) {
-                                Log.e(TAG, "Failed to get fresh DroidGuard token for Sync retry")
-                                throw retryEx
-                            }
-                            Log.d(TAG, "Got fresh DG token for retry (${freshSyncToken.length} chars)")
-
-                            // Rebuild request with fresh DG token
-                            currentSyncRequest = rebuildSyncRequestWithDg(currentSyncRequest, freshSyncToken)
-                            continue
-                        }
-
-                        // Non-retryable error or last attempt - rethrow for outer catch
-                        throw retryEx
-                    }
-                }
-
-                val response = syncRetryResponse
-                    ?: throw Exception("Sync failed: no response after $MAX_SYNC_ATTEMPTS attempts")
-                // Write full response to file, log summary only
-                try {
-                    val respStr = response.toString()
-                    val dir = File(context.filesDir, "constellation_logs")
-                    dir.mkdirs()
-                    val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
-                    val respFile = File(dir, "SyncResponse_${ts}.txt")
-                    respFile.writeText(respStr)
-                    val verStates = response.responses.map { it.verification?.state?.name ?: "null" }
-                    Log.d(TAG, "Received Sync response: ${response.responses.size} verifications, states=$verStates, next_sync=${response.next_sync_time?.timestamp}, file=${respFile.absolutePath}")
-                } catch (e: Exception) {
-                    Log.d(TAG, "Received Sync response: ${response.responses.size} verifications (file write failed: ${e.message})")
-                }
-
-                // Check for public key acknowledgment in response (GMS bbah.java:1746-1758)
-                // Path: SyncResponse.header (field 3) → ResponseHeader.client_info_update (field 1)
-                // → ClientInfoUpdate.public_key_status (field 1)
-                val publicKeyStatus = response.header_?.client_info_update?.public_key_status
-                if (publicKeyStatus == PublicKeyStatus.CLIENT_KEY_UPDATED) {
-                    Log.i(TAG, "Public key acknowledged by server (status=$publicKeyStatus)")
-                    keyPrefs.edit().putBoolean("is_public_key_acked", true).apply()
-                } else if (publicKeyStatus == PublicKeyStatus.PUBLIC_KEY_STATUS_NO_STATUS) {
-                    Log.d(TAG, "No public key status update from server")
-                } else {
-                    Log.d(TAG, "Public key status: $publicKeyStatus")
-                }
-
-                // Store verification_tokens from SyncResponse (stock GMS bewt.java:192-201)
-                // These are echoed back in subsequent SyncRequests for backup/restore acquisition flows.
-                val responseVerificationTokens = response.verification_tokens
-                if (responseVerificationTokens.isNotEmpty()) {
-                    try {
-                        val tokenBytes = responseVerificationTokens.map { android.util.Base64.encodeToString(it.encode(), android.util.Base64.NO_WRAP) }
-                        keyPrefs.edit().putStringSet("verification_tokens", tokenBytes.toSet()).apply()
-                        Log.i(TAG, "Stored ${responseVerificationTokens.size} verification_tokens from SyncResponse")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to store verification_tokens: ${e.message}")
-                    }
-                }
-
-                // Cache SyncResponse DroidGuard token
-                val syncDgTokenResponse = response.droidguard_token_response
-                if (syncDgTokenResponse != null) {
-                    val serverToken = syncDgTokenResponse.droidguard_token
-                    val serverTtl = syncDgTokenResponse.droidguard_token_ttl
-                    if (!serverToken.isNullOrEmpty()) {
-                        val ttlMillis = serverTtl?.toEpochMilli() ?: 0L
-                        rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("sync"), serverToken, ttlMillis, iidToken)
-                        Log.i(TAG, "Cached DroidGuard token from SyncResponse (${serverToken.length} chars, TTL: ${java.util.Date(ttlMillis)})")
-                    }
-                }
-
-                // Check verification responses for state
-                val responses = response.responses
-                if (responses.isEmpty()) {
-                    Log.w(TAG, "No verification responses in SyncResponse")
+                val syncOutcome = try {
+                    runSyncFlow(
+                        rpc = rpc,
+                        requestContext = SyncRequestContext(
+                            context = context,
+                            keyPrefs = keyPrefs,
+                            initialRequest = syncRequest,
+                            iidToken = iidToken,
+                            imsi = imsi,
+                            phoneNumber = phoneNumber
+                        )
+                    )
+                } catch (e: SyncNoResponsesException) {
                     return@runBlocking Ts43Client.EntitlementResult.error("sync-no-responses")
                 }
 
-                Log.d(TAG, "Processing ${responses.size} verification responses")
-                var hasVerified = false
-                var hasPending = false
-                var hasNone = false
-
-                for (verificationResponse in responses) {
-                    val responseVerification = verificationResponse.verification
-                    val state = responseVerification?.state
-                    val responseSimInfo = responseVerification?.association?.sim?.sim_info
-                    val responseImsi = responseSimInfo?.imsi?.firstOrNull() ?: ""
-                    val responseMsisdn = responseSimInfo?.sim_readable_number ?: ""
-
-                    Log.d(TAG, "VerificationResponse: state=$state, imsi=${if (responseImsi.isNotEmpty()) "***${responseImsi.takeLast(4)}" else "empty"}, msisdn=${if (responseMsisdn.isNotEmpty()) "***${responseMsisdn.takeLast(4)}" else "empty"}")
-
-                    when (state) {
-                        VerificationState.VERIFICATION_STATE_VERIFIED -> {
-                            Log.i(TAG, "Phone number VERIFIED!")
-                            Log.i("MicroGRcs", "constellation sync result=VERIFIED reason=0")
-                            hasVerified = true
-                        }
-                        VerificationState.VERIFICATION_STATE_PENDING -> {
-                            Log.w(TAG, "PENDING state - requires Proceed RPC with OTP")
-                            Log.i("MicroGRcs", "constellation sync result=PENDING reason=0")
-                            hasPending = true
-                        }
-                        VerificationState.VERIFICATION_STATE_NONE -> {
-                            // NONE means "no verification record exists for this SIM".
-                            // Stock GMS does NOT treat NONE as VERIFIED (bfqe.d()).
-                            // Try GPNV as best-effort (for stock->microG swap where server has cached verification).
-                            Log.w(TAG, "NONE state - no verification exists for this SIM. IMSI was: ${if (imsi.isNotEmpty()) "present" else "EMPTY (likely cause)"}")
-                            hasNone = true
-                        }
-                        else -> {
-                            Log.w(TAG, "Unexpected state: $state")
-                        }
-                    }
-                }
-
-                // If verified (or NONE with possible cached verification), call GetVerifiedPhoneNumbers
-                if (hasVerified) {
+                if (syncOutcome.hasVerified) {
                     Log.i(TAG, "Calling GetVerifiedPhoneNumbers to retrieve JWT token...")
 
                     try {
@@ -898,7 +749,7 @@ class GoogleConstellationClient(private val context: Context) {
                 // NONE state - best-effort GPNV for stock->microG swap, then check reason
                 // Stock GMS handles NONE separately: stores record with state=NONE, calls GPNV as
                 // independent read-only query (bevv.java). If GPNV returns nothing, no token is provided.
-                if (hasNone && !hasVerified && !hasPending) {
+                if (syncOutcome.noneReason != null && !syncOutcome.hasVerified && syncOutcome.pendingVerification == null) {
                     Log.i(TAG, "NONE state: trying GPNV as best-effort (stock→microG swap scenario)...")
                     try {
                         val verifiedToken = fetchVerifiedPhoneToken(
@@ -916,262 +767,56 @@ class GoogleConstellationClient(private val context: Context) {
                         Log.w(TAG, "GPNV failed for NONE state: ${e.message}")
                     }
 
-                    // Check UnverifiedInfo.reason from the NONE-state verification.
-                    // GMS enum hzdf maps reason->status code sent to Messages:
-                    //   5->7 (WaitingForManualMsisdnEntryState - phone number input UI)
-                    val noneVerification = responses.firstOrNull {
-                        it.verification?.state == VerificationState.VERIFICATION_STATE_NONE
-                    }?.verification
-                    val unverifiedReason = noneVerification?.unverified_info?.reason_enum_1 ?: 0
-                    Log.i(TAG, "NONE state UnverifiedInfo: reason=$unverifiedReason")
-                    Log.i("MicroGRcs", "constellation sync result=NONE reason=$unverifiedReason")
+                    val unverifiedReason = syncOutcome.noneReason
 
-                    // Only reason=5 (PHONE_NUMBER_ENTRY_REQUIRED) maps to status 7.
-                    // GMS maps: 0->0, 1->3(retry), 2->2(retry), 3->4, 4->5, 5->7(phone input), 6->8, 7->9, 8->10
                     if (unverifiedReason == 5) {
                         Log.i(TAG, "Server requests manual phone number entry (reason=5) - returning status 7")
                         return@runBlocking Ts43Client.EntitlementResult.phoneNumberEntryRequired("none-phone-number-entry-required")
                     }
 
-                    // Retryable reasons: UNKNOWN(0), THROTTLED(1), FAILED(2) - return 5002 so Messages retries
-                    // UNKNOWN(0) = server has no definitive answer yet, retry may get reason=5
                     if (unverifiedReason in listOf(0, 1, 2)) {
                         Log.w(TAG, "NONE state retryable reason=$unverifiedReason - returning Status(5002) for retry")
                         return@runBlocking Ts43Client.EntitlementResult.error("5002:none-state-reason-$unverifiedReason")
                     }
 
-                    // Non-retryable: INELIGIBLE(6), DENIED(7), NOT_IN_SERVICE(8), etc.
                     Log.w(TAG, "NONE state non-retryable reason=$unverifiedReason - returning Status(5001)")
                     return@runBlocking Ts43Client.EntitlementResult.error("5001:none-state-reason-$unverifiedReason")
                 }
 
                 // Challenge dispatch loop (multi-type, multi-round)
-                if (hasPending) {
-                    Log.i(TAG, "Verification is PENDING - entering challenge dispatch loop")
-
-                    val pendingResponses = responses.filter {
-                        it.verification?.state == VerificationState.VERIFICATION_STATE_PENDING
-                    }
-                    var currentVerification = if (!phoneNumber.isNullOrEmpty()) {
-                        pendingResponses.firstOrNull {
-                            it.verification?.association?.sim?.sim_info?.sim_readable_number == phoneNumber
-                        }?.verification ?: pendingResponses.firstOrNull()?.verification
-                    } else {
-                        pendingResponses.firstOrNull()?.verification
-                    }
-
-                    if (currentVerification == null) {
-                        Log.e(TAG, "hasPending=true but no pending verification found")
-                        return@runBlocking Ts43Client.EntitlementResult.error("pending-inconsistent")
-                    }
-
-                    val proceedDeviceId = DeviceId(iid_token = iidToken, device_android_id = deviceAndroidId, user_android_id = userAndroidId)
+                if (syncOutcome.pendingVerification != null) {
+                    val proceedDeviceId = DeviceId(
+                        iid_token = iidToken,
+                        device_android_id = deviceAndroidId,
+                        user_android_id = userAndroidId,
+                    )
                     val proceedClientCredentials = createClientCredentials(iidToken, proceedDeviceId)
-
-                    // Session tracking for challenge types that span multiple rounds
-                    val carrierIdAttempts = mutableMapOf<String, Int>()  // challengeId → attempt count
-                    var moSmsSent = false  // MO SMS only sent once; subsequent rounds are polling
-
-                    for (round in 1..16) {
-                        val challenge = currentVerification?.pending_challenge?.challenge
-                        if (challenge == null) {
-                            Log.w(TAG, "Round $round: no challenge in pending verification")
-                            break
-                        }
-                        val challengeType = challenge.type
-                        val challengeId = challenge.challenge_id?.id ?: "unknown"
-                        Log.i(TAG, "Round $round/16: challenge type=$challengeType id=$challengeId")
-
-                        // Compute timeout from server's expiry_time (if available)
-                        // ServerTimestamp fields are Wire Instant (epochSecond + nano)
-                        val expiryTimeMs = challenge.expiry_time?.let { exp ->
-                            val serverNowMs = exp.now?.let { it.epochSecond * 1000L + it.nano / 1_000_000L } ?: 0L
-                            val serverExpiryMs = exp.timestamp?.let { it.epochSecond * 1000L + it.nano / 1_000_000L } ?: 0L
-                            if (serverNowMs > 0 && serverExpiryMs > serverNowMs) {
-                                serverExpiryMs - serverNowMs
-                            } else null
-                        }
-
-                        // Dispatch to appropriate verifier
-                        val challengeResponse: google.internal.communications.phonedeviceverification.v1.ChallengeResponse? = when (challengeType) {
-                            google.internal.communications.phonedeviceverification.v1.ChallengeType.CHALLENGE_TYPE_MT_SMS -> {
-                                // Use server expiry_time if available, otherwise 120s default
-                                val timeoutSec = (expiryTimeMs?.div(1000) ?: 120L).coerceIn(10, 300)
-                                Log.i(TAG, "  MT_SMS: waiting ${timeoutSec}s for incoming OTP...")
-                                val otpSms = SmsInbox.awaitMatch(timeoutSeconds = timeoutSec)
-                                if (otpSms != null) {
-                                    Log.i(TAG, "  MT_SMS: received from ${otpSms.originatingAddress} (${otpSms.messageBody.length} chars)")
-                                    google.internal.communications.phonedeviceverification.v1.ChallengeResponse(
-                                        mt_challenge_response = google.internal.communications.phonedeviceverification.v1.MTChallengeResponse(
-                                            sms_body = otpSms.messageBody,
-                                            originating_address = otpSms.originatingAddress
-                                        )
-                                    )
-                                } else {
-                                    Log.w(TAG, "  MT_SMS: timeout after ${timeoutSec}s - proceeding with empty response")
-                                    // On timeout: proceed with empty response (server may transition to next challenge)
-                                    google.internal.communications.phonedeviceverification.v1.ChallengeResponse(
-                                        mt_challenge_response = google.internal.communications.phonedeviceverification.v1.MTChallengeResponse(
-                                            sms_body = "", originating_address = ""
-                                        )
-                                    )
-                                }
-                            }
-                            google.internal.communications.phonedeviceverification.v1.ChallengeType.CHALLENGE_TYPE_MO_SMS -> {
-                                val moChallenge = challenge.mo_challenge
-                                if (moChallenge == null) {
-                                    Log.w(TAG, "  MO_SMS: no mo_challenge data"); null
-                                } else if (!moSmsSent) {
-                                    // First round: actually send the SMS
-                                    Log.i(TAG, "  MO_SMS: sending to ${moChallenge.proxy_number}")
-                                    moSmsSent = true
-                                    ChallengeProcessor.sendMoSms(context, moChallenge, subId)
-                                } else {
-                                    // Subsequent rounds with same MO_SMS: polling - server checks if SMS arrived.
-                                    // polling_intervals is comma-separated ms values (e.g., "4000,1000,1000,3000,5000")
-                                    val pollDelays = moChallenge.polling_intervals.split(",").mapNotNull { it.trim().toLongOrNull() }
-                                    val pollIndex = (round - 2).coerceAtLeast(0)  // round 1 = send, round 2+ = poll
-                                    val pollDelay = pollDelays.getOrElse(pollIndex) { pollDelays.lastOrNull() ?: 5000L }
-                                    Log.i(TAG, "  MO_SMS: polling round (SMS already sent), waiting ${pollDelay}ms")
-                                    delay(pollDelay.coerceIn(1000, 30000))
-                                    // Return completed status for poll
-                                    google.internal.communications.phonedeviceverification.v1.ChallengeResponse(
-                                        mo_challenge_response = google.internal.communications.phonedeviceverification.v1.MOChallengeResponse(
-                                            status = google.internal.communications.phonedeviceverification.v1.MOChallengeStatus.MO_STATUS_COMPLETED
-                                        )
-                                    )
-                                }
-                            }
-                            google.internal.communications.phonedeviceverification.v1.ChallengeType.CHALLENGE_TYPE_CARRIER_ID -> {
-                                val carrierChallenge = challenge.carrier_id_challenge
-                                if (carrierChallenge == null) {
-                                    Log.w(TAG, "  CARRIER_ID: no carrier_id_challenge data"); null
-                                } else {
-                                    // Track retry attempts per challengeId (server may resend same challenge)
-                                    val attempts = carrierIdAttempts.getOrDefault(challengeId, 0) + 1
-                                    carrierIdAttempts[challengeId] = attempts
-                                    if (attempts > 3) {
-                                        Log.w(TAG, "  CARRIER_ID: retry exceeded ($attempts) for $challengeId")
-                                        google.internal.communications.phonedeviceverification.v1.ChallengeResponse(
-                                            carrier_id_challenge_response = google.internal.communications.phonedeviceverification.v1.CarrierIDChallengeResponse(
-                                                carrier_id_error = google.internal.communications.phonedeviceverification.v1.CarrierIdError.CARRIER_ID_ERROR_RETRY_ATTEMPT_EXCEEDED
-                                            )
-                                        )
-                                    } else {
-                                        Log.i(TAG, "  CARRIER_ID: attempt $attempts/3, isim_request=${carrierChallenge.isim_request.length} chars")
-                                        ChallengeProcessor.verifyCarrierId(context, carrierChallenge, subId)
-                                    }
-                                }
-                            }
-                            google.internal.communications.phonedeviceverification.v1.ChallengeType.CHALLENGE_TYPE_TS43 -> {
-                                val ts43Challenge = challenge.ts43_challenge
-                                if (ts43Challenge == null) {
-                                    Log.w(TAG, "  TS43: no ts43_challenge data"); null
-                                } else {
-                                    Log.i(TAG, "  TS43: entitlement_url=${ts43Challenge.entitlement_url} realm=${ts43Challenge.eap_aka_realm}")
-                                    ChallengeProcessor.handleTs43Challenge(context, ts43Challenge, subId, phoneNumber)
-                                }
-                            }
-                            else -> {
-                                Log.w(TAG, "  Unsupported challenge type: $challengeType")
-                                null
-                            }
-                        }
-
-                        if (challengeResponse == null) {
-                            Log.w(TAG, "Round $round: verifier returned null, exiting loop")
-                            break
-                        }
-
-                        // Build and execute Proceed RPC (no-DG-first)
-                        val proceedDgToken = rpc.getDroidGuardToken("proceed", iidToken)
-                        val proceedClientInfo = buildClientInfo(
-                            ctx = protoCtx,
-                            droidGuardToken = proceedDgToken
-                        )
-                        val proceedHeader = buildRequestHeader(
+                    when (val proceedOutcome = runProceedFlow(
+                        ProceedRequestContext(
+                            context = context,
+                            rpc = rpc,
+                            protoCtx = protoCtx,
+                            gpnvRequestContext = gpnvRequestContext,
                             sessionId = sessionId,
-                            clientInfo = proceedClientInfo,
-                            clientCredentials = proceedClientCredentials
+                            iidToken = iidToken,
+                            subId = subId,
+                            phoneNumber = phoneNumber,
+                            deviceAndroidId = deviceAndroidId,
+                            userAndroidId = userAndroidId,
+                            proceedClientCredentials = proceedClientCredentials,
+                            initialVerification = syncOutcome.pendingVerification,
                         )
-                        val proceedRequest = google.internal.communications.phonedeviceverification.v1.ProceedRequest(
-                            verification = currentVerification,
-                            challenge_response = challengeResponse,
-                            header_ = proceedHeader
-                        )
-
-                        Log.i(TAG, "Round $round: calling Proceed (challenge_id=$challengeId)")
-
-                        // No-DG-first strategy
-                        val noDgRequest = proceedRequest.copy(
-                            header_ = proceedHeader.copy(
-                                client_info = proceedHeader.client_info?.copy(device_signals = DeviceSignals())
-                            )
-                        )
-                        val proceedResponse = try {
-                            val proceedNoDgResponse = rpc.proceed(noDgRequest)
-                            Log.i(TAG, "Round $round: Proceed SUCCESS (no-DG)")
-                            proceedNoDgResponse
-                        } catch (e: Exception) {
-                            if (e is com.squareup.wire.GrpcException && proceedDgToken != null) {
-                                Log.w(TAG, "Round $round: Proceed no-DG failed (${e.grpcStatus.name}), retrying with DG")
-                                try {
-                                    val proceedWithDgResponse = rpc.proceed(proceedRequest)
-                                    Log.i(TAG, "Round $round: Proceed SUCCESS (with DG)")
-                                    proceedWithDgResponse
-                                } catch (e2: Exception) {
-                                    Log.e(TAG, "Round $round: Proceed with DG also failed: ${e2.message}")
-                                    return@runBlocking Ts43Client.EntitlementResult.error("proceed-failed-round-$round", e2)
-                                }
-                            } else {
-                                Log.e(TAG, "Round $round: Proceed failed: ${e.message}")
-                                return@runBlocking Ts43Client.EntitlementResult.error("proceed-failed-round-$round", e)
-                            }
+                    )) {
+                        is ProceedFlowOutcome.Verified -> {
+                            return@runBlocking Ts43Client.EntitlementResult.success(proceedOutcome.jwt)
                         }
-
-                        // Cache DG token from response
-                        proceedResponse.droidguard_token_response?.let { dgResp ->
-                            if (!dgResp.droidguard_token.isNullOrEmpty()) {
-                                rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("proceed"), dgResp.droidguard_token, dgResp.droidguard_token_ttl?.toEpochMilli() ?: 0L, iidToken)
-                            }
+                        is ProceedFlowOutcome.Error -> {
+                            return@runBlocking Ts43Client.EntitlementResult.error(proceedOutcome.reason, proceedOutcome.cause)
                         }
-
-                        // Check outcome
-                        val newVerification = proceedResponse.verification
-                        val newState = newVerification?.state
-                        Log.i(TAG, "Round $round: post-Proceed state=$newState")
-
-                        if (newState == VerificationState.VERIFICATION_STATE_VERIFIED) {
-                            Log.i(TAG, "VERIFIED after round $round! Calling GPNV for JWT...")
-                            val verifiedToken = fetchVerifiedPhoneToken(
-                                rpc = rpc,
-                                requestContext = gpnvRequestContext,
-                                targetPhone = phoneNumber,
-                                marker = "GPNV_POST_PROCEED"
-                            )
-                            if (verifiedToken != null) {
-                                return@runBlocking Ts43Client.EntitlementResult.success(verifiedToken.jwt)
-                            } else {
-                                Log.e(TAG, "VERIFIED but GPNV returned empty token")
-                                return@runBlocking Ts43Client.EntitlementResult.error("proceed-no-token")
-                            }
-                        } else if (newState == VerificationState.VERIFICATION_STATE_PENDING) {
-                            Log.i(TAG, "Still PENDING after round $round, looping...")
-                            currentVerification = newVerification
-                            // MO_SMS polling: delay before next round
-                            if (challengeType == google.internal.communications.phonedeviceverification.v1.ChallengeType.CHALLENGE_TYPE_MO_SMS) {
-                                val intervals = challenge.mo_challenge?.polling_intervals?.split(",")?.mapNotNull { it.trim().toLongOrNull() } ?: emptyList()
-                                val delay = intervals.getOrNull(round - 1) ?: 5000L
-                                Log.d(TAG, "MO_SMS polling delay: ${delay}ms")
-                                kotlinx.coroutines.delay(delay)
-                            }
-                            continue
-                        } else {
-                            Log.w(TAG, "Unexpected post-Proceed state: $newState (round $round)")
-                            break
+                        ProceedFlowOutcome.Incomplete -> {
+                            Log.w(TAG, "Proceed flow ended without terminal verification")
                         }
                     }
-                    Log.w(TAG, "Challenge loop exhausted (16 rounds) or exited early")
                 }
 
                 // If we got here, no token was found
