@@ -71,6 +71,24 @@ class GoogleConstellationClient(private val context: Context) {
         val carrierInfo: CarrierInfo
     )
 
+    private data class ConstellationCallContext(
+        val rpc: ConstellationRpcClient,
+        val keyPrefs: android.content.SharedPreferences,
+        val iidToken: String,
+        val sessionId: String,
+        val subId: Int,
+        val imsi: String,
+        val phoneNumber: String,
+        val deviceAndroidId: Long,
+        val userAndroidId: Long,
+        val registeredAppIds: List<StringId>,
+        val params: List<Param>,
+        val protoCtx: RequestProtoContext,
+        val gpnvRequestContext: GpnvRequestContext,
+        val syncRequest: SyncRequest,
+        val proceedClientCredentials: ClientCredentials?,
+    )
+
     companion object {
         private const val TAG = "GmsConstellationClient"
         // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
@@ -335,7 +353,7 @@ class GoogleConstellationClient(private val context: Context) {
             Log.d(TAG, "Using API key auth with package=$packageName, cert=$certSha1")
 
             runBlocking {
-                var rpcClient: ConstellationRpcClient? = null
+                var callContext: ConstellationCallContext? = null
                 try {
                 // Get IID token - MUST be registered with Constellation project ID!
                 // Uses shared method that handles caching, registration, and fallbacks
@@ -391,7 +409,6 @@ class GoogleConstellationClient(private val context: Context) {
                     spatulaHeader = spatulaHeader,
                     iidHash = iidHash
                 )
-                rpcClient = rpc
 
                 val keyPrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
                 val keyMaterial = loadOrCreateKeyMaterial(keyPrefs)
@@ -689,14 +706,39 @@ class GoogleConstellationClient(private val context: Context) {
                     verificationTokens = loadedVerificationTokens
                 )
 
-                val consentOutcome = runConsentFlow(
+                val proceedDeviceId = DeviceId(
+                    iid_token = iidToken,
+                    device_android_id = deviceAndroidId,
+                    user_android_id = userAndroidId,
+                )
+                val proceedClientCredentials = createClientCredentials(iidToken, proceedDeviceId)
+                callContext = ConstellationCallContext(
                     rpc = rpc,
+                    keyPrefs = keyPrefs,
+                    iidToken = iidToken,
+                    sessionId = sessionId,
+                    subId = subId,
+                    imsi = imsi,
+                    phoneNumber = phoneNumber,
+                    deviceAndroidId = deviceAndroidId,
+                    userAndroidId = userAndroidId,
+                    registeredAppIds = registeredAppIds,
+                    params = params,
+                    protoCtx = protoCtx,
+                    gpnvRequestContext = gpnvRequestContext,
+                    syncRequest = syncRequest,
+                    proceedClientCredentials = proceedClientCredentials,
+                )
+                val call = checkNotNull(callContext)
+
+                val consentOutcome = runConsentFlow(
+                    rpc = call.rpc,
                     requestContext = ConsentRequestContext(
-                        sessionId = sessionId,
-                        protoCtx = protoCtx,
-                        registeredAppIds = registeredAppIds,
-                        params = params,
-                        iidToken = iidToken
+                        sessionId = call.sessionId,
+                        protoCtx = call.protoCtx,
+                        registeredAppIds = call.registeredAppIds,
+                        params = call.params,
+                        iidToken = call.iidToken
                     )
                 )
                 Log.d(
@@ -711,14 +753,14 @@ class GoogleConstellationClient(private val context: Context) {
                 try {
                 val syncOutcome = try {
                     runSyncFlow(
-                        rpc = rpc,
+                        rpc = call.rpc,
                         requestContext = SyncRequestContext(
                             context = context,
-                            keyPrefs = keyPrefs,
-                            initialRequest = syncRequest,
-                            iidToken = iidToken,
-                            imsi = imsi,
-                            phoneNumber = phoneNumber
+                            keyPrefs = call.keyPrefs,
+                            initialRequest = call.syncRequest,
+                            iidToken = call.iidToken,
+                            imsi = call.imsi,
+                            phoneNumber = call.phoneNumber
                         )
                     )
                 } catch (e: SyncNoResponsesException) {
@@ -730,9 +772,9 @@ class GoogleConstellationClient(private val context: Context) {
 
                     try {
                         val verifiedToken = fetchVerifiedPhoneToken(
-                            rpc = rpc,
-                            requestContext = gpnvRequestContext,
-                            targetPhone = phoneNumber,
+                            rpc = call.rpc,
+                            requestContext = call.gpnvRequestContext,
+                            targetPhone = call.phoneNumber,
                             marker = "GPNV_POST_SYNC"
                         )
                         if (verifiedToken != null) {
@@ -753,9 +795,9 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.i(TAG, "NONE state: trying GPNV as best-effort (stock→microG swap scenario)...")
                     try {
                         val verifiedToken = fetchVerifiedPhoneToken(
-                            rpc = rpc,
-                            requestContext = gpnvRequestContext,
-                            targetPhone = phoneNumber,
+                            rpc = call.rpc,
+                            requestContext = call.gpnvRequestContext,
+                            targetPhone = call.phoneNumber,
                             marker = "GPNV_NONE_BEST_EFFORT"
                         )
                         if (verifiedToken != null) {
@@ -785,25 +827,19 @@ class GoogleConstellationClient(private val context: Context) {
 
                 // Challenge dispatch loop (multi-type, multi-round)
                 if (syncOutcome.pendingVerification != null) {
-                    val proceedDeviceId = DeviceId(
-                        iid_token = iidToken,
-                        device_android_id = deviceAndroidId,
-                        user_android_id = userAndroidId,
-                    )
-                    val proceedClientCredentials = createClientCredentials(iidToken, proceedDeviceId)
                     when (val proceedOutcome = runProceedFlow(
                         ProceedRequestContext(
                             context = context,
-                            rpc = rpc,
-                            protoCtx = protoCtx,
-                            gpnvRequestContext = gpnvRequestContext,
-                            sessionId = sessionId,
-                            iidToken = iidToken,
-                            subId = subId,
-                            phoneNumber = phoneNumber,
-                            deviceAndroidId = deviceAndroidId,
-                            userAndroidId = userAndroidId,
-                            proceedClientCredentials = proceedClientCredentials,
+                            rpc = call.rpc,
+                            protoCtx = call.protoCtx,
+                            gpnvRequestContext = call.gpnvRequestContext,
+                            sessionId = call.sessionId,
+                            iidToken = call.iidToken,
+                            subId = call.subId,
+                            phoneNumber = call.phoneNumber,
+                            deviceAndroidId = call.deviceAndroidId,
+                            userAndroidId = call.userAndroidId,
+                            proceedClientCredentials = call.proceedClientCredentials,
                             initialVerification = syncOutcome.pendingVerification,
                         )
                     )) {
@@ -836,8 +872,8 @@ class GoogleConstellationClient(private val context: Context) {
                         }
                         // Clear DroidGuard cache on auth errors (GMS bewt.java:180-191)
                         if (e.grpcStatus.code == 7 || e.grpcStatus.code == 16) {
-                            rpc.clearDroidGuardTokenCache(rpc.resolveDroidGuardFlow("sync"), "Sync auth error (grpc-status=${e.grpcStatus.code})")
-                            keyPrefs.edit().putBoolean("is_public_key_acked", false).apply()
+                            call.rpc.clearDroidGuardTokenCache(call.rpc.resolveDroidGuardFlow("sync"), "Sync auth error (grpc-status=${e.grpcStatus.code})")
+                            call.keyPrefs.edit().putBoolean("is_public_key_acked", false).apply()
                             Log.w(TAG, "Cleared is_public_key_acked due to grpc-status=${e.grpcStatus.code}")
                         }
                     } else {
@@ -866,9 +902,9 @@ class GoogleConstellationClient(private val context: Context) {
                     try {
                         Log.i(TAG, "GPNV_FALLBACK: Calling GetVerifiedPhoneNumbers after verification state: sync-failed")
                         val verifiedToken = fetchVerifiedPhoneToken(
-                            rpc = rpc,
-                            requestContext = gpnvRequestContext,
-                            targetPhone = phoneNumber,
+                            rpc = call.rpc,
+                            requestContext = call.gpnvRequestContext,
+                            targetPhone = call.phoneNumber,
                             marker = "GPNV_FALLBACK"
                         )
                         val jwt = verifiedToken?.jwt
@@ -904,7 +940,7 @@ class GoogleConstellationClient(private val context: Context) {
                     // Dispose SMS receivers (pre-registered before Sync)
                     SmsInbox.dispose(context)
                     // Close RPC client (closes DG handle + gRPC resources)
-                    rpcClient?.close()
+                    callContext?.rpc?.close()
                 }
             }
         } catch (e: Exception) {
