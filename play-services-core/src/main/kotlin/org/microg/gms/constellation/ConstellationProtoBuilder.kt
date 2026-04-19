@@ -7,7 +7,7 @@ package org.microg.gms.constellation
 
 import android.content.Context
 import android.net.ConnectivityManager
-import android.net.NetworkInfo
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
 import android.telephony.ServiceState
@@ -83,35 +83,37 @@ fun gatherConnectivityInfos(context: Context): List<ConnectivityInfo> {
     val result = mutableListOf<ConnectivityInfo>()
     try {
         @Suppress("DEPRECATION")
-        val allNetworks = connectivityManager?.allNetworkInfo
-        allNetworks?.forEach { networkInfo ->
-            val type = networkInfo.type
-            if (type == ConnectivityManager.TYPE_WIFI || type == ConnectivityManager.TYPE_MOBILE) {
-                val connType = when (type) {
-                    ConnectivityManager.TYPE_WIFI -> ConnectivityType.CONNECTIVITY_TYPE_WIFI
-                    ConnectivityManager.TYPE_MOBILE -> ConnectivityType.CONNECTIVITY_TYPE_MOBILE
-                    else -> ConnectivityType.CONNECTIVITY_TYPE_UNKNOWN
-                }
-                val connState = when (networkInfo.state) {
-                    NetworkInfo.State.CONNECTED -> ConnectivityState.CONNECTIVITY_STATE_CONNECTED
-                    NetworkInfo.State.CONNECTING -> ConnectivityState.CONNECTIVITY_STATE_CONNECTING
-                    NetworkInfo.State.DISCONNECTED -> ConnectivityState.CONNECTIVITY_STATE_DISCONNECTED
-                    NetworkInfo.State.DISCONNECTING -> ConnectivityState.CONNECTIVITY_STATE_DISCONNECTING
-                    NetworkInfo.State.SUSPENDED -> ConnectivityState.CONNECTIVITY_STATE_SUSPENDED
-                    else -> ConnectivityState.CONNECTIVITY_STATE_UNKNOWN
-                }
-                val connAvail = if (networkInfo.isAvailable) {
-                    ConnectivityAvailability.CONNECTIVITY_AVAILABLE
-                } else {
-                    ConnectivityAvailability.CONNECTIVITY_NOT_AVAILABLE
-                }
-                result.add(ConnectivityInfo(
-                    type = connType,
-                    state = connState,
-                    availability = connAvail
-                ))
+        val bestByType = linkedMapOf<ConnectivityType, ConnectivityInfo>()
+        connectivityManager?.allNetworks?.forEach { network ->
+            val caps = connectivityManager.getNetworkCapabilities(network) ?: return@forEach
+            val connType = when {
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> ConnectivityType.CONNECTIVITY_TYPE_WIFI
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> ConnectivityType.CONNECTIVITY_TYPE_MOBILE
+                else -> ConnectivityType.CONNECTIVITY_TYPE_UNKNOWN
+            }
+            if (connType == ConnectivityType.CONNECTIVITY_TYPE_UNKNOWN) return@forEach
+
+            val connState = when {
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) -> ConnectivityState.CONNECTIVITY_STATE_CONNECTED
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) -> ConnectivityState.CONNECTIVITY_STATE_CONNECTING
+                else -> ConnectivityState.CONNECTIVITY_STATE_UNKNOWN
+            }
+            val connAvail = if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                ConnectivityAvailability.CONNECTIVITY_AVAILABLE
+            } else {
+                ConnectivityAvailability.CONNECTIVITY_NOT_AVAILABLE
+            }
+            val newInfo = ConnectivityInfo(
+                type = connType,
+                state = connState,
+                availability = connAvail
+            )
+            val oldInfo = bestByType[connType]
+            if (oldInfo == null || newInfo.state.value > oldInfo.state.value) {
+                bestByType[connType] = newInfo
             }
         }
+        result.addAll(bestByType.values)
     } catch (e: SecurityException) {
         Log.w(TAG, "Could not get connectivity info", e)
     }
@@ -138,9 +140,14 @@ fun gatherTelephonyData(
     val allSubs = subscriptionManager?.activeSubscriptionInfoList ?: emptyList()
     val subscriptionInfo = if (targetImsi != null && allSubs.size > 1) {
         allSubs.find { sub ->
-            val subMccMnc = "${sub.mcc}${String.format("%02d", sub.mnc)}"
+            @Suppress("DEPRECATION")
+            val subMcc = if (Build.VERSION.SDK_INT >= 29) sub.mccString?.toIntOrNull() else sub.mcc
+            @Suppress("DEPRECATION")
+            val subMnc = if (Build.VERSION.SDK_INT >= 29) sub.mncString?.toIntOrNull() else sub.mnc
+            val subMccMnc = "${subMcc ?: -1}${String.format("%02d", subMnc ?: -1)}"
             targetImsi.startsWith(subMccMnc)
         } ?: allSubs.find { sub ->
+            @Suppress("DEPRECATION")
             targetMsisdn != null && sub.number != null && sub.number.isNotEmpty() &&
                 (targetMsisdn.endsWith(sub.number.takeLast(8)) || sub.number.endsWith(targetMsisdn.takeLast(8)))
         } ?: allSubs.firstOrNull().also {
@@ -151,7 +158,11 @@ fun gatherTelephonyData(
     }
 
     val subId = subscriptionInfo?.subscriptionId ?: SubscriptionManager.INVALID_SUBSCRIPTION_ID
-    Log.d(TAG, "Subscription match: target IMSI=${targetImsi?.take(5)}***, matched subId=${subscriptionInfo?.subscriptionId}, slot=${subscriptionInfo?.simSlotIndex}, mcc=${subscriptionInfo?.mcc}, mnc=${subscriptionInfo?.mnc}")
+    @Suppress("DEPRECATION")
+    val matchedMcc = if (Build.VERSION.SDK_INT >= 29) subscriptionInfo?.mccString else subscriptionInfo?.mcc?.toString()
+    @Suppress("DEPRECATION")
+    val matchedMnc = if (Build.VERSION.SDK_INT >= 29) subscriptionInfo?.mncString else subscriptionInfo?.mnc?.toString()
+    Log.d(TAG, "Subscription match: target IMSI=${targetImsi?.take(5)}***, matched subId=${subscriptionInfo?.subscriptionId}, slot=${subscriptionInfo?.simSlotIndex}, mcc=$matchedMcc, mnc=$matchedMnc")
 
     val telephonyManagerSub = if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
         try {
@@ -201,11 +212,12 @@ fun gatherTelephonyData(
     }
     val dataRoamingInt = if (telephonyManagerSub?.isNetworkRoaming == true) 2 else 1
 
-    val activeNetworkInfo = connectivityManager?.activeNetworkInfo
+    val activeNetwork = connectivityManager?.activeNetwork
+    val activeNetworkCaps = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
     val networkRoamingInt = when {
-        activeNetworkInfo == null -> 0
-        activeNetworkInfo.isRoaming -> 2
-        else -> 1
+        activeNetworkCaps == null -> 0
+        activeNetworkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING) -> 1
+        else -> 2
     }
 
     val hasReadSms = context.checkSelfPermission(android.Manifest.permission.READ_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -215,6 +227,7 @@ fun gatherTelephonyData(
     } else {
         val userManager = context.getSystemService(Context.USER_SERVICE) as? android.os.UserManager
         val userRestricted = userManager?.userRestrictions?.getBoolean("no_sms") == true
+        @Suppress("DEPRECATION")
         val isSmsCapable = telephonyManagerSub?.isSmsCapable == true
         if (userRestricted) 4 else if (!isSmsCapable) 1 else 2
     }
