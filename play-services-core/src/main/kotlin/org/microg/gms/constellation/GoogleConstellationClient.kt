@@ -25,13 +25,10 @@ import org.microg.gms.auth.AuthConstants
 import org.microg.gms.auth.AuthManager
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
-import java.time.Instant
-import java.util.Base64
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import google.internal.communications.phonedeviceverification.v1.ClientInfo
 import google.internal.communications.phonedeviceverification.v1.CountryInfo
 import google.internal.communications.phonedeviceverification.v1.DeviceId
@@ -54,14 +51,10 @@ import google.internal.communications.phonedeviceverification.v1.CredentialMetad
 import google.internal.communications.phonedeviceverification.v1.CarrierInfo
 import google.internal.communications.phonedeviceverification.v1.IdTokenRequest
 import com.google.android.gms.constellation.VerifyPhoneNumberRequest as AidlVerifyPhoneNumberRequest
-import google.internal.communications.phonedeviceverification.v1.GetVerifiedPhoneNumbersRequest
-import google.internal.communications.phonedeviceverification.v1.ClientCredentialsProto
-import google.internal.communications.phonedeviceverification.v1.IdTokenRequestProto
 import google.internal.communications.phonedeviceverification.v1.ProceedRequest
 import google.internal.communications.phonedeviceverification.v1.ChallengeResponse
 import google.internal.communications.phonedeviceverification.v1.MTChallengeResponse
 import google.internal.communications.phonedeviceverification.v1.ProceedResponse
-import google.internal.communications.phonedeviceverification.v1.ConsentValue
 
 class GoogleConstellationClient(private val context: Context) {
     private data class ConstellationKeyMaterial(
@@ -270,23 +263,6 @@ class GoogleConstellationClient(private val context: Context) {
 
     }
 
-    /**
-     * Find verified phone number matching target, or fall back to first.
-     * Stock GMS matches by phone; we were using firstOrNull() blindly (wrong on multi-SIM).
-     */
-    private fun findMatchingVerifiedNumber(
-        numbers: List<google.internal.communications.phonedeviceverification.v1.VerifiedPhoneNumber>,
-        targetPhone: String?
-    ): google.internal.communications.phonedeviceverification.v1.VerifiedPhoneNumber? {
-        if (numbers.isEmpty()) return null
-        if (!targetPhone.isNullOrEmpty()) {
-            val match = numbers.firstOrNull { it.phone_number == targetPhone }
-            if (match != null) return match
-            Log.w(TAG, "No exact phone match for $targetPhone in ${numbers.size} numbers, using first")
-        }
-        return numbers.firstOrNull()
-    }
-
     private suspend fun getGaiaTokens(packageName: String): List<String> {
         val accountManager = AccountManager.get(context)
         val accounts = accountManager.getAccountsByType(AuthConstants.DEFAULT_ACCOUNT_TYPE)
@@ -358,7 +334,7 @@ class GoogleConstellationClient(private val context: Context) {
     }
 
     fun verifyPhoneNumber(request: AidlVerifyPhoneNumberRequest?, callingPackage: String?, imsiOverride: String?, msisdnOverride: String?): Ts43Client.EntitlementResult {
-        val requestedNumber = request?.policyId ?: msisdnOverride
+        val requestedNumber = extractRequestedPhoneNumber(request, msisdnOverride)
         Log.i(TAG, "verifyPhoneNumber: phone=$requestedNumber")
 
         return (try {
@@ -610,6 +586,14 @@ class GoogleConstellationClient(private val context: Context) {
                 val idTokenNonce = idTokenCarrierInfo.idTokenNonce
                 val idTokenCallingPackage = idTokenCarrierInfo.idTokenCallingPackage
                 val carrierInfo = idTokenCarrierInfo.carrierInfo
+                val gpnvRequestContext = GpnvRequestContext(
+                    sessionId = sessionId,
+                    privateKey = privateKey,
+                    readOnlyIidToken = readOnlyIidToken,
+                    idTokenCertificateHash = idTokenCertificateHash,
+                    idTokenCallingPackage = idTokenCallingPackage,
+                    idTokenNonce = idTokenNonce
+                )
 
                 val deviceIdentity = resolveDeviceIdentity()
                 val deviceAndroidId = deviceIdentity.deviceAndroidId
@@ -715,153 +699,20 @@ class GoogleConstellationClient(private val context: Context) {
                     verificationTokens = loadedVerificationTokens
                 )
 
-                // First call GetConsent (required before Sync for new clients!)
-                // From proto: "When the client is a new client coming online for the first time.
-                // It has checked the consent using GetConsent."
-                Log.d(TAG, "Calling GetConsent first...")
-
-                // Generate GetConsent-specific DroidGuard token
-                // GMS bewt.java:480 passes lowercase method name as DG rpc binding
-                val getConsentToken = rpc.getDroidGuardToken("getConsent", iidToken)
-                if (getConsentToken == null) {
-                    Log.w(TAG, "DroidGuard token for GetConsent FAILED - proceeding without DG (no-DG-first strategy)")
-                }
-
-                val consentRequest = buildGetConsentRequest(
-                    sessionId = sessionId,
-                    ctx = protoCtx,
-                    getConsentToken = getConsentToken,
-                    registeredAppIds = registeredAppIds,
-                    params = params
+                val consentOutcome = runConsentFlow(
+                    rpc = rpc,
+                    requestContext = ConsentRequestContext(
+                        sessionId = sessionId,
+                        protoCtx = protoCtx,
+                        registeredAppIds = registeredAppIds,
+                        params = params,
+                        iidToken = iidToken
+                    )
                 )
-
-                try {
-                    val consentResponse = rpc.getConsent(consentRequest)
-                    Log.i(TAG, "GetConsent SUCCESS: consent=${consentResponse.device_consent?.consent} dg_resp=${consentResponse.droidguard_token_response != null}")
-
-                    // Cache DroidGuard token from response (GMS bewt.java:1111-1128)
-                    // Server returns processed token (ARfb...) + TTL in field 9
-                    val dgTokenResponse = consentResponse.droidguard_token_response
-                    if (dgTokenResponse != null) {
-                        val serverToken = dgTokenResponse.droidguard_token
-                        if (!serverToken.isNullOrEmpty()) {
-                            val ttlMillis = try { dgTokenResponse.droidguard_token_ttl?.toEpochMilli() ?: 0L } catch (_: Exception) { 0L }
-                            rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("getConsent"), serverToken, ttlMillis, iidToken)
-                            Log.i(TAG, "Cached ARfb from GetConsent: ${serverToken.length} chars, TTL=${java.util.Date(ttlMillis)}")
-                        } else {
-                            Log.w(TAG, "GetConsent DG token response present but empty")
-                        }
-                    } else {
-                        Log.w(TAG, "No DG token in GetConsent response - Sync will use raw DG")
-                    }
-
-                    if (consentResponse.device_consent?.consent == ConsentValue.CONSENT_VALUE_CONSENTED) {
-                        Log.i(TAG, "Consent already established")
-                    } else {
-                        // Auto-call SetConsent when consent is not established.
-                        // Stock GMS (bevm.java:1426-1428) throws bfpx and ABORTS here.
-                        // Messages handles consent via Asterism service 199.
-                        // API doc says DG only required for Sync/Proceed, not SetConsent.
-                        // Try without DG first; if PERMISSION_DENIED, retry with DG.
-                        Log.w(TAG, "Consent NOT established (${consentResponse.device_consent?.consent}) - calling SetConsent(CONSENTED)...")
-                        try {
-                            // Try SetConsent WITHOUT DG first
-                            // If PERMISSION_DENIED, retry WITH DG token
-                            var setConsentSucceeded = false
-                            Log.d(TAG, "SetConsent attempt 1: WITHOUT DroidGuard (API doc: DG not required for SetConsent)")
-                            try {
-                                val noDgRequest = buildSetConsentRequest(sessionId, protoCtx, null)
-                                Log.d(TAG, "SetConsent request size (no DG): ${noDgRequest.encode().size} bytes")
-                                rpc.setConsent(noDgRequest)
-                                Log.i(TAG, "SetConsent SUCCESS (no DG)! Server accepted consent without DroidGuard.")
-                                setConsentSucceeded = true
-                            } catch (e1: Exception) {
-                                val code1 = if (e1 is com.squareup.wire.GrpcException) e1.grpcStatus.code else -1
-                                Log.w(TAG, "SetConsent without DG failed: grpc-status=$code1 ${e1.message}")
-                                if (code1 == 7) {
-                                    // PERMISSION_DENIED - retry with DG token
-                                    Log.d(TAG, "SetConsent attempt 2: WITH DroidGuard token")
-                                    val setConsentToken = rpc.getDroidGuardToken("setConsent", iidToken)
-                                    if (setConsentToken != null) {
-                                        try {
-                                            val dgRequest = buildSetConsentRequest(sessionId, protoCtx, setConsentToken)
-                                            Log.d(TAG, "SetConsent request size (with DG): ${dgRequest.encode().size} bytes")
-                                            rpc.setConsent(dgRequest)
-                                            Log.i(TAG, "SetConsent SUCCESS (with DG)!")
-                                            setConsentSucceeded = true
-                                        } catch (e2: Exception) {
-                                            Log.e(TAG, "SetConsent with DG also failed: ${e2.message}")
-                                            if (e2 is com.squareup.wire.GrpcException) {
-                                                Log.e(TAG, "  gRPC status: code=${e2.grpcStatus.code} name=${e2.grpcStatus.name} msg=${e2.grpcMessage}")
-                                            }
-                                        }
-                                    } else {
-                                        Log.e(TAG, "Failed to get DroidGuard token for SetConsent retry")
-                                    }
-                                } else {
-                                    Log.e(TAG, "SetConsent failed with non-PERMISSION_DENIED error, not retrying")
-                                    Log.d(TAG, "SetConsent exception trace:", e1)
-                                }
-                            }
-
-                            // If SetConsent succeeded, retry GetConsent to get ARfb
-                            if (setConsentSucceeded) {
-                                Log.d(TAG, "Retrying GetConsent to obtain ARfb token...")
-                                val retryToken = rpc.getDroidGuardToken("getConsent", iidToken)
-                                if (retryToken != null) {
-                                    val retryRequest = buildGetConsentRequest(
-                                        sessionId = sessionId,
-                                        ctx = protoCtx,
-                                        getConsentToken = retryToken,
-                                        registeredAppIds = registeredAppIds,
-                                        params = params
-                                    )
-                                    val retryResponse = rpc.getConsent(retryRequest)
-                                    Log.i(TAG, "GetConsent retry: consent=${retryResponse.device_consent?.consent}")
-
-                                    val retryDg = retryResponse.droidguard_token_response
-                                    if (retryDg != null && !retryDg.droidguard_token.isNullOrEmpty()) {
-                                        val retryArfbToken = retryDg.droidguard_token
-                                        val ttl = try { retryDg.droidguard_token_ttl?.toEpochMilli() ?: 0L } catch (_: Exception) { 0L }
-                                        rpc.cacheDroidGuardToken(rpc.resolveDroidGuardFlow("getConsent"), retryArfbToken, ttl, iidToken)
-                                        Log.i(TAG, "  ARfb cached from retry! ${retryArfbToken.length} chars")
-                                    } else {
-                                        Log.w(TAG, "  No ARfb in retry response - Sync will use raw DG token")
-                                    }
-                                }
-                            } else {
-                                Log.w(TAG, "SetConsent failed - continuing to Sync (may fail)")
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "SetConsent block failed: ${e.javaClass.simpleName}: ${e.message}")
-                            Log.d(TAG, "SetConsent block exception trace:", e)
-                            Log.w(TAG, "Continuing to Sync despite SetConsent failure")
-                        }
-                    }
-                } catch (e: Exception) {
-                    if (e is com.squareup.wire.GrpcException) {
-                        Log.e(TAG, "GetConsent gRPC error: code=${e.grpcStatus.code} name=${e.grpcStatus.name}")
-                        Log.e(TAG, "GetConsent gRPC message: ${e.grpcMessage}")
-                        val details = e.grpcStatusDetails
-                        if (details != null) {
-                            val b64 = android.util.Base64.encodeToString(details, android.util.Base64.NO_WRAP)
-                            Log.e(TAG, "GetConsent gRPC statusDetails (${details.size} bytes): $b64")
-                        } else {
-                            Log.e(TAG, "GetConsent gRPC statusDetails: null")
-                        }
-                        // Clear DroidGuard cache on auth errors (GMS bewt.java:180-191)
-                        if (e.grpcStatus.code == 7 || e.grpcStatus.code == 16) {
-                            rpc.clearDroidGuardTokenCache(rpc.resolveDroidGuardFlow("getConsent"), "Auth error (grpc-status=${e.grpcStatus.code})")
-                        }
-                    } else {
-                        Log.e(TAG, "GetConsent failed: ${e.javaClass.simpleName}: ${e.message}")
-                        if (e.cause != null) {
-                            Log.e(TAG, "  Cause: ${e.cause?.javaClass?.simpleName}: ${e.cause?.message}")
-                        }
-                    }
-                    Log.d(TAG, "Full exception trace:", e)
-                    Log.w(TAG, "GetConsent failed; continuing to Sync for experiment")
-                }
+                Log.d(
+                    TAG,
+                    "ConsentFlow outcome: consented=${consentOutcome.consented}, setConsentAttempted=${consentOutcome.setConsentAttempted}, setConsentSucceeded=${consentOutcome.setConsentSucceeded}, arfbCached=${consentOutcome.arfbCached}"
+                )
 
                 // Pre-register SMS receivers BEFORE Sync (race fix: SMS may arrive during RPC).
                 // SMS may arrive during the Sync RPC if server issues PENDING immediately.
@@ -1027,24 +878,14 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.i(TAG, "Calling GetVerifiedPhoneNumbers to retrieve JWT token...")
 
                     try {
-                        val getTokensRequest = buildGpnvRequest(
-                            sessionId = sessionId,
-                            privateKey = privateKey,
-                            readOnlyIidToken = readOnlyIidToken,
-                            idTokenCertificateHash = idTokenCertificateHash,
-                            idTokenCallingPackage = idTokenCallingPackage,
-                            idTokenNonce = idTokenNonce
+                        val verifiedToken = fetchVerifiedPhoneToken(
+                            rpc = rpc,
+                            requestContext = gpnvRequestContext,
+                            targetPhone = phoneNumber,
+                            marker = "GPNV_POST_SYNC"
                         )
-
-                        // Create PhoneNumber client (separate service from PhoneDeviceVerification)
-                        val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
-                        Log.i(TAG, "GetVerifiedPhoneNumbers response: ${tokensResponse.verified_phone_numbers.size} numbers")
-
-                        val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
-                        if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
-                            val jwt = firstNumber.token
-                            logJwtSummary("GPNV_POST_SYNC", jwt, firstNumber.phone_number)
-                            return@runBlocking Ts43Client.EntitlementResult.success(jwt)
+                        if (verifiedToken != null) {
+                            return@runBlocking Ts43Client.EntitlementResult.success(verifiedToken.jwt)
                         } else {
                             Log.w(TAG, "GetVerifiedPhoneNumbers returned empty token")
                         }
@@ -1060,20 +901,14 @@ class GoogleConstellationClient(private val context: Context) {
                 if (hasNone && !hasVerified && !hasPending) {
                     Log.i(TAG, "NONE state: trying GPNV as best-effort (stock→microG swap scenario)...")
                     try {
-                        val getTokensRequest = buildGpnvRequest(
-                            sessionId = sessionId,
-                            privateKey = privateKey,
-                            readOnlyIidToken = readOnlyIidToken,
-                            idTokenCertificateHash = idTokenCertificateHash,
-                            idTokenCallingPackage = idTokenCallingPackage,
-                            idTokenNonce = idTokenNonce
+                        val verifiedToken = fetchVerifiedPhoneToken(
+                            rpc = rpc,
+                            requestContext = gpnvRequestContext,
+                            targetPhone = phoneNumber,
+                            marker = "GPNV_NONE_BEST_EFFORT"
                         )
-                        val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
-                        val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
-                        if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
-                            val jwt = firstNumber.token
-                            logJwtSummary("GPNV_NONE_BEST_EFFORT", jwt, firstNumber.phone_number)
-                            return@runBlocking Ts43Client.EntitlementResult.success(jwt)
+                        if (verifiedToken != null) {
+                            return@runBlocking Ts43Client.EntitlementResult.success(verifiedToken.jwt)
                         } else {
                             Log.w(TAG, "GPNV returned nothing for NONE state - no cached verification exists")
                         }
@@ -1308,19 +1143,14 @@ class GoogleConstellationClient(private val context: Context) {
 
                         if (newState == VerificationState.VERIFICATION_STATE_VERIFIED) {
                             Log.i(TAG, "VERIFIED after round $round! Calling GPNV for JWT...")
-                            val getTokensRequest = buildGpnvRequest(
-                                sessionId = sessionId,
-                                privateKey = privateKey,
-                                readOnlyIidToken = readOnlyIidToken,
-                                idTokenCertificateHash = idTokenCertificateHash,
-                                idTokenCallingPackage = idTokenCallingPackage,
-                                idTokenNonce = idTokenNonce
+                            val verifiedToken = fetchVerifiedPhoneToken(
+                                rpc = rpc,
+                                requestContext = gpnvRequestContext,
+                                targetPhone = phoneNumber,
+                                marker = "GPNV_POST_PROCEED"
                             )
-                            val tokensResponse = rpc.getVerifiedPhoneNumbers(getTokensRequest)
-                            val firstNumber = findMatchingVerifiedNumber(tokensResponse.verified_phone_numbers, phoneNumber)
-                            if (firstNumber != null && !firstNumber.token.isNullOrEmpty()) {
-                                logJwtSummary("GPNV_POST_PROCEED", firstNumber.token, firstNumber.phone_number)
-                                return@runBlocking Ts43Client.EntitlementResult.success(firstNumber.token)
+                            if (verifiedToken != null) {
+                                return@runBlocking Ts43Client.EntitlementResult.success(verifiedToken.jwt)
                             } else {
                                 Log.e(TAG, "VERIFIED but GPNV returned empty token")
                                 return@runBlocking Ts43Client.EntitlementResult.error("proceed-no-token")
@@ -1389,23 +1219,15 @@ class GoogleConstellationClient(private val context: Context) {
                     // ============================================================
                     Log.i(TAG, "GPNV_FALLBACK: START - GetConsent/Sync failed, checking for cached verification")
                     try {
-                        val fallbackRequest = buildGpnvRequest(
-                            sessionId = sessionId,
-                            privateKey = privateKey,
-                            readOnlyIidToken = readOnlyIidToken,
-                            idTokenCertificateHash = idTokenCertificateHash,
-                            idTokenCallingPackage = idTokenCallingPackage,
-                            idTokenNonce = idTokenNonce
-                        )
-
                         Log.i(TAG, "GPNV_FALLBACK: Calling GetVerifiedPhoneNumbers after verification state: sync-failed")
-                        val fallbackResponse = rpc.getVerifiedPhoneNumbers(fallbackRequest)
-                        Log.i(TAG, "GPNV_FALLBACK: returned ${fallbackResponse.verified_phone_numbers.size} verified numbers")
-
-                        val firstNumber = findMatchingVerifiedNumber(fallbackResponse.verified_phone_numbers, phoneNumber)
-                        val jwt = firstNumber?.token
+                        val verifiedToken = fetchVerifiedPhoneToken(
+                            rpc = rpc,
+                            requestContext = gpnvRequestContext,
+                            targetPhone = phoneNumber,
+                            marker = "GPNV_FALLBACK"
+                        )
+                        val jwt = verifiedToken?.jwt
                         if (!jwt.isNullOrEmpty()) {
-                            logJwtSummary("GPNV_FALLBACK", jwt, firstNumber.phone_number)
                             Log.i(TAG, "GPNV_FALLBACK: returned JWT token (${jwt.length} chars)")
                             // Persist a minimal breadcrumb so success is visible even if logcat rolls.
                             try {
@@ -1422,7 +1244,7 @@ class GoogleConstellationClient(private val context: Context) {
                             return@runBlocking Ts43Client.EntitlementResult.success(jwt)
                         }
 
-                        Log.i(TAG, "GPNV_FALLBACK: MISS (verified_phone_numbers=${fallbackResponse.verified_phone_numbers.size}, token_empty=${jwt.isNullOrEmpty()}) - no cached verification found")
+                        Log.i(TAG, "GPNV_FALLBACK: MISS (token_empty=${jwt.isNullOrEmpty()}) - no cached verification found")
                     } catch (gpnvEx: Exception) {
                         val gpnvMsg = gpnvEx.message ?: ""
                         val gpnvStatus = Regex("grpc-status=(\\d+)").find(gpnvMsg)?.groupValues?.get(1)
@@ -1447,16 +1269,6 @@ class GoogleConstellationClient(private val context: Context) {
             val s = if (!result.token.isNullOrEmpty()) "VERIFIED" else if (result.isError()) "ERROR" else if (result.needsManualMsisdn) "MANUAL_MSISDN" else if (result.ineligible) "INELIGIBLE" else "UNKNOWN"
             Log.i("MicroGRcs", "provision status=$s reason=${result.reason ?: "none"}")
         }
-    }
-
-    private fun jwtSha256HexPrefix(jwt: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(jwt.toByteArray(Charsets.UTF_8))
-        // 4 bytes => 8 hex chars (compact but unique enough for logs)
-        val sb = StringBuilder(8)
-        for (b in digest.take(4)) {
-            sb.append(String.format("%02x", b))
-        }
-        return sb.toString()
     }
 
     private fun loadVerificationTokens(
@@ -1666,101 +1478,6 @@ class GoogleConstellationClient(private val context: Context) {
             idTokenCallingPackage = idTokenCallingPackage,
             carrierInfo = carrierInfo
         )
-    }
-
-    private fun createIidTokenAuth(
-        privateKey: java.security.PrivateKey?,
-        iidTokenForSig: String
-    ): ClientCredentialsProto {
-        if (privateKey == null) {
-            Log.w(TAG, "GPNV auth: private key missing; sending iid_token without client_signature")
-            return ClientCredentialsProto(
-                iid_token = iidTokenForSig,
-                client_signature = ByteString.EMPTY,
-                signature_timestamp = null
-            )
-        }
-
-        val nowMillis = System.currentTimeMillis()
-        val seconds = nowMillis / 1000
-        val nanos = ((nowMillis % 1000) * 1_000_000).toInt()
-        val signingString = "$iidTokenForSig:$seconds:$nanos"
-
-        return try {
-            val signature = java.security.Signature.getInstance("SHA256withECDSA")
-            signature.initSign(privateKey)
-            signature.update(signingString.toByteArray(Charsets.UTF_8))
-            val signatureBytes = signature.sign()
-            val ts = Instant.ofEpochSecond(seconds, nanos.toLong())
-
-            ClientCredentialsProto(
-                iid_token = iidTokenForSig,
-                client_signature = ByteString.of(*signatureBytes),
-                signature_timestamp = ts
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "GPNV auth: failed to generate client_signature; sending iid_token without signature", e)
-            ClientCredentialsProto(
-                iid_token = iidTokenForSig,
-                client_signature = ByteString.EMPTY,
-                signature_timestamp = null
-            )
-        }
-    }
-
-    private fun buildGpnvRequest(
-        sessionId: String,
-        privateKey: java.security.PrivateKey?,
-        readOnlyIidToken: String,
-        idTokenCertificateHash: String,
-        idTokenCallingPackage: String,
-        idTokenNonce: String
-    ): GetVerifiedPhoneNumbersRequest {
-        return GetVerifiedPhoneNumbersRequest(
-            session_id = sessionId,
-            client_credentials = createIidTokenAuth(privateKey, readOnlyIidToken),
-            selection_types = listOf(1),
-            id_token_request = IdTokenRequestProto(
-                certificate_hash = idTokenCertificateHash,
-                calling_package = idTokenCallingPackage,
-                token_nonce = idTokenNonce
-            ),
-            droidguard_result = ""
-        )
-    }
-
-    private fun decodeJwtPayloadJson(jwt: String): JSONObject? {
-        val parts = jwt.split('.')
-        if (parts.size < 2) return null
-        val payloadB64 = parts[1]
-        val padLen = (4 - (payloadB64.length % 4)) % 4
-        val padded = payloadB64 + "=".repeat(padLen)
-        return try {
-            val decoded = Base64.getUrlDecoder().decode(padded)
-            JSONObject(String(decoded, Charsets.UTF_8))
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun logJwtSummary(marker: String, jwt: String, phoneFromResponse: String?) {
-        val sha8 = try {
-            jwtSha256HexPrefix(jwt)
-        } catch (_: Exception) {
-            "????????"
-        }
-
-        val payload = decodeJwtPayloadJson(jwt)
-        val iss = payload?.optString("iss")
-        val expSec = payload?.optLong("exp")?.takeIf { it > 0 } ?: 0L
-        val expDate = if (expSec > 0) java.util.Date(expSec * 1000L).toString() else "?"
-        val phoneClaim = payload?.optString("phone_number")
-        val phoneSuffix = phoneClaim?.takeLast(4)
-        val method = payload?.optJSONObject("google")?.optString("phone_number_verification_method")
-        val respSuffix = phoneFromResponse?.takeLast(4)
-
-        Log.i(TAG, "$marker: JWT len=${jwt.length} sha256_8=$sha8 iss=${iss ?: "?"} exp=${if (expSec > 0) expSec else "?"} ($expDate) phone_suffix=${phoneSuffix ?: "?"} method=${method ?: "?"} resp_phone_suffix=${respSuffix ?: "?"}")
-        Log.i("MicroGRcs", "constellation JWT len=${jwt.length} phone=***${phoneSuffix ?: "?"}")
     }
 
 }

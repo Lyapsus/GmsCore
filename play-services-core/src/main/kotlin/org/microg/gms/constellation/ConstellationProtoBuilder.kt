@@ -20,6 +20,15 @@ import okio.ByteString
 
 private const val TAG = "GmsConstellationProto"
 
+@Suppress("DEPRECATION")
+private fun ConnectivityManager.allNetworksCompat(): Array<android.net.Network> = allNetworks
+
+@Suppress("DEPRECATION")
+private fun SubscriptionInfo.mccCompat(): Int = mcc
+
+@Suppress("DEPRECATION")
+private fun SubscriptionInfo.mncCompat(): Int = mnc
+
 // ---- Data classes for gathered system state ----
 
 /**
@@ -82,9 +91,8 @@ fun gatherConnectivityInfos(context: Context): List<ConnectivityInfo> {
     val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     val result = mutableListOf<ConnectivityInfo>()
     try {
-        @Suppress("DEPRECATION")
         val bestByType = linkedMapOf<ConnectivityType, ConnectivityInfo>()
-        connectivityManager?.allNetworks?.forEach { network ->
+        connectivityManager?.allNetworksCompat()?.forEach { network ->
             val caps = connectivityManager.getNetworkCapabilities(network) ?: return@forEach
             val connType = when {
                 caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> ConnectivityType.CONNECTIVITY_TYPE_WIFI
@@ -140,10 +148,8 @@ fun gatherTelephonyData(
     val allSubs = subscriptionManager?.activeSubscriptionInfoList ?: emptyList()
     val subscriptionInfo = if (targetImsi != null && allSubs.size > 1) {
         allSubs.find { sub ->
-            @Suppress("DEPRECATION")
-            val subMcc = if (Build.VERSION.SDK_INT >= 29) sub.mccString?.toIntOrNull() else sub.mcc
-            @Suppress("DEPRECATION")
-            val subMnc = if (Build.VERSION.SDK_INT >= 29) sub.mncString?.toIntOrNull() else sub.mnc
+            val subMcc = if (Build.VERSION.SDK_INT >= 29) sub.mccString?.toIntOrNull() else sub.mccCompat()
+            val subMnc = if (Build.VERSION.SDK_INT >= 29) sub.mncString?.toIntOrNull() else sub.mncCompat()
             val subMccMnc = "${subMcc ?: -1}${String.format("%02d", subMnc ?: -1)}"
             targetImsi.startsWith(subMccMnc)
         } ?: allSubs.find { sub ->
@@ -158,10 +164,8 @@ fun gatherTelephonyData(
     }
 
     val subId = subscriptionInfo?.subscriptionId ?: SubscriptionManager.INVALID_SUBSCRIPTION_ID
-    @Suppress("DEPRECATION")
-    val matchedMcc = if (Build.VERSION.SDK_INT >= 29) subscriptionInfo?.mccString else subscriptionInfo?.mcc?.toString()
-    @Suppress("DEPRECATION")
-    val matchedMnc = if (Build.VERSION.SDK_INT >= 29) subscriptionInfo?.mncString else subscriptionInfo?.mnc?.toString()
+    val matchedMcc = if (Build.VERSION.SDK_INT >= 29) subscriptionInfo?.mccString else subscriptionInfo?.mccCompat()?.toString()
+    val matchedMnc = if (Build.VERSION.SDK_INT >= 29) subscriptionInfo?.mncString else subscriptionInfo?.mncCompat()?.toString()
     Log.d(TAG, "Subscription match: target IMSI=${targetImsi?.take(5)}***, matched subId=${subscriptionInfo?.subscriptionId}, slot=${subscriptionInfo?.simSlotIndex}, mcc=$matchedMcc, mnc=$matchedMnc")
 
     val telephonyManagerSub = if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
