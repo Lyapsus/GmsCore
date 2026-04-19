@@ -55,7 +55,11 @@ internal suspend fun fetchVerifiedPhoneToken(
 internal fun extractRequestedPhoneNumber(
     request: AidlVerifyPhoneNumberRequest?,
     msisdnOverride: String?,
-): String? = request?.policyId ?: msisdnOverride
+): String? {
+    val requestMsisdn = request?.imsiRequests?.firstOrNull()?.msisdn?.takeIf { it.isNotEmpty() }
+    val e164PolicyId = request?.policyId?.takeIf { it.startsWith("+") }
+    return requestMsisdn ?: msisdnOverride ?: e164PolicyId
+}
 
 internal fun findMatchingVerifiedNumber(
     numbers: List<VerifiedPhoneNumber>,

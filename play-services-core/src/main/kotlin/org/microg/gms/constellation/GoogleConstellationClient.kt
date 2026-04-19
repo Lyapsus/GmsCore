@@ -15,6 +15,7 @@ import org.microg.gms.gcm.RegisterRequest
 import org.microg.gms.gcm.RegisterResponse
 import android.telephony.TelephonyManager
 import android.util.Log
+import com.google.android.gms.BuildConfig
 import org.microg.gms.common.Constants
 import kotlinx.coroutines.runBlocking
 import okio.ByteString
@@ -93,8 +94,6 @@ class GoogleConstellationClient(private val context: Context) {
         private const val TAG = "GmsConstellationClient"
         // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
         private const val API_KEY = "AIzaSyAP-gfH3qvi6vgHZbSYwQ_XHqV_mXHhzIk"
-        private const val GMSCORE_VERSION_NUMBER = 260233
-        private const val GMSCORE_VERSION = "26.02.33 (190400-858744110)"
         private const val GAIA_TOKEN_SCOPE = "oauth2:https://www.googleapis.com/auth/numberer"
 
         // settings put global microg_constellation_force_one_time_verification off
@@ -446,18 +445,13 @@ class GoogleConstellationClient(private val context: Context) {
                 // gaiaTokens already obtained above (used for proto body gaia_ids in GetConsent)
                 Log.i(TAG, "OAuth tokens for proto body: ${gaiaTokens.size} available, format: ${gaiaTokens.firstOrNull()?.take(10) ?: "none"}...")
 
-                // CRITICAL: GMS ALWAYS sends OAuth tokens in field 2 and field 12
-                // If we don't have real tokens, send a placeholder to match the structure
-                // This tests whether the API requires VALID tokens or just the field presence
-                val effectiveTokens = if (gaiaTokens.isNotEmpty()) {
-                    gaiaTokens
-                } else {
-                    Log.w(TAG, "No OAuth tokens available - sending placeholder to test structure requirement")
-                    listOf("placeholder_oauth_token")  // Will likely fail, but tests the structure
+                if (gaiaTokens.isEmpty()) {
+                    Log.e(TAG, "No Google account / Gaia token available - aborting Constellation verification")
+                    return@runBlocking Ts43Client.EntitlementResult.error("no-gaia-token")
                 }
 
                 // Field 12 in ClientInfo: repeated StringId (registered_app_ids)
-                val registeredAppIds = effectiveTokens.map { StringId(value_ = it) }
+                val registeredAppIds = gaiaTokens.map { StringId(value_ = it) }
 
                 // SIMAssociation.identifiers (field 2) uses repeated StringId
                 val simAssociationIdentifiers = registeredAppIds
@@ -574,8 +568,8 @@ class GoogleConstellationClient(private val context: Context) {
                     userAndroidId = userAndroidId,
                     publicKeyBytes = publicKeyBytes,
                     localeStr = localeStr,
-                    gmscoreVersionNumber = GMSCORE_VERSION_NUMBER,
-                    gmscoreVersion = GMSCORE_VERSION,
+                    gmscoreVersionNumber = constellationGmscoreVersionNumber(),
+                    gmscoreVersion = constellationGmscoreVersionString(),
                     registeredAppIds = registeredAppIds,
                     countryInfo = countryInfo,
                     connectivityInfos = connectivityInfos,
@@ -1024,7 +1018,7 @@ class GoogleConstellationClient(private val context: Context) {
             ?: requestedNumber?.takeIf { it.isNotEmpty() && it.startsWith("+") }
             ?: telephonyMsisdn.takeIf { it.isNotEmpty() }
             ?: ""
-        val phoneNumber = request?.policyId ?: msisdn
+        val phoneNumber = msisdn
 
         Log.i(TAG, "IMSI/MSISDN resolution: imsi=${if (imsi.isNotEmpty()) "${imsi.take(5)}..." else "EMPTY"} (src=${when { requestImsi != null -> "AIDL"; imsiOverride != null -> "override"; telephonyImsi.isNotEmpty() -> "TelephonyManager(sub=$subId)"; else -> "NONE" }}), msisdn=${if (msisdn.isNotEmpty()) "${msisdn.take(5)}..." else "EMPTY"}")
 
@@ -1203,6 +1197,16 @@ class GoogleConstellationClient(private val context: Context) {
             Log.e(TAG, "Failed to create client credentials", e)
             null
         }
+    }
+
+    private fun constellationGmscoreVersionNumber(): Int = BuildConfig.VERSION_CODE / 1000
+
+    private fun constellationGmscoreVersionString(): String {
+        val versionNumber = constellationGmscoreVersionNumber()
+        val major = versionNumber / 10000
+        val minor = (versionNumber / 100) % 100
+        val patch = versionNumber % 100
+        return "$major.$minor.$patch"
     }
 
 }
