@@ -29,12 +29,6 @@ private fun SubscriptionInfo.mccCompat(): Int = mcc
 @Suppress("DEPRECATION")
 private fun SubscriptionInfo.mncCompat(): Int = mnc
 
-// ---- Data classes for gathered system state ----
-
-/**
- * All telephony/SIM data gathered from the device for proto building.
- * Produced by [gatherTelephonyData], consumed by [buildTelephonyInfo], [buildSIMInfo], etc.
- */
 data class TelephonyData(
     val simCountry: String,
     val networkCountry: String,
@@ -63,10 +57,6 @@ data class TelephonyData(
     val telephonyManagerSub: TelephonyManager?,
 )
 
-/**
- * Common parameters shared across all request builders within a single verifyPhoneNumber call.
- * Avoids threading 20+ parameters through every builder function.
- */
 data class RequestProtoContext(
     val iidToken: String,
     val deviceAndroidId: Long,
@@ -81,12 +71,6 @@ data class RequestProtoContext(
     val telephonyInfoContainer: TelephonyInfoContainer?,
 )
 
-// ---- System state gathering functions ----
-
-/**
- * Gather connectivity info from ConnectivityManager.
- * Verified against GMS bbah.java:1024-1104.
- */
 fun gatherConnectivityInfos(context: Context): List<ConnectivityInfo> {
     val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     val result = mutableListOf<ConnectivityInfo>()
@@ -129,12 +113,6 @@ fun gatherConnectivityInfos(context: Context): List<ConnectivityInfo> {
     return result
 }
 
-/**
- * Gather all telephony and SIM data needed for proto construction.
- *
- * @param targetImsi IMSI from the AIDL request (for dual-SIM matching)
- * @param targetMsisdn MSISDN from the AIDL request (for dual-SIM matching)
- */
 fun gatherTelephonyData(
     context: Context,
     targetImsi: String?,
@@ -144,7 +122,6 @@ fun gatherTelephonyData(
     val subscriptionManager = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
     val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
-    // Match subscription to IMSI from request (dual-SIM)
     val allSubs = subscriptionManager?.activeSubscriptionInfoList ?: emptyList()
     val subscriptionInfo = if (targetImsi != null && allSubs.size > 1) {
         allSubs.find { sub ->

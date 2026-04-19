@@ -289,8 +289,8 @@ private suspend fun executeProceed(
     Log.i(TAG, "Round $round: post-Proceed state=$newState")
 
     return when (newState) {
-        VerificationState.VERIFICATION_STATE_VERIFIED -> ProceedExecutionOutcome.Verified(newVerification ?: currentVerification)
-        VerificationState.VERIFICATION_STATE_PENDING -> ProceedExecutionOutcome.Pending(newVerification ?: currentVerification)
+        VerificationState.VERIFICATION_STATE_VERIFIED -> ProceedExecutionOutcome.Verified(newVerification)
+        VerificationState.VERIFICATION_STATE_PENDING -> ProceedExecutionOutcome.Pending(newVerification)
         else -> ProceedExecutionOutcome.OtherState(newState)
     }
 }

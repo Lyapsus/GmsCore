@@ -92,22 +92,12 @@ class GoogleConstellationClient(private val context: Context) {
 
     companion object {
         private const val TAG = "GmsConstellationClient"
-        // GMS uses API key + Spatula auth (NO OAuth Bearer on gRPC transport - bewt.c bdpb has no account/scopes)
         private const val API_KEY = "AIzaSyAP-gfH3qvi6vgHZbSYwQ_XHqV_mXHhzIk"
         private const val GAIA_TOKEN_SCOPE = "oauth2:https://www.googleapis.com/auth/numberer"
 
-        // settings put global microg_constellation_force_one_time_verification off
         private const val FORCE_ONE_TIME_VERIFICATION_KEY = "microg_constellation_force_one_time_verification"
 
 
-        /**
-         * Get or register the IID token for Constellation.
-         * This is used by both verifyPhoneNumber() and the getIidToken() AIDL method.
-         *
-         * @param context Application context
-         * @param packageName Calling package name (usually "com.google.android.gms")
-         * @return Pair of (token, source) where source indicates where token came from
-         */
         @JvmStatic
         @JvmOverloads
         fun getOrRegisterIidToken(
@@ -117,7 +107,6 @@ class GoogleConstellationClient(private val context: Context) {
         ): Pair<String, String> {
             val prefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION_IID, Context.MODE_PRIVATE)
 
-            // Check for cached token (either self-registered or seeded from stock GMS)
             val hasKeyPair = prefs.getString("key_private", null) != null
             val cachedToken = prefs.getString("iid_token_$senderId", null)
             val cachedSource = prefs.getString("iid_source_$senderId", null)
@@ -132,11 +121,6 @@ class GoogleConstellationClient(private val context: Context) {
                 prefs.edit().remove("iid_token_$senderId").remove("iid_source_$senderId").apply()
             }
 
-            // Try to seed from stock GMS's preserved data (GMS->microG swap).
-            // Stock GMS stores per-sender IID tokens in appid.xml as "|T|{senderId}|GCM"
-            // and the Constellation primary sender token also in constellation_prefs.xml as "gcm_token".
-
-            // Check appid.xml (covers ALL senders including read-only 745476177629)
             val appIdPrefs = context.getSharedPreferences("com.google.android.gms.appid", Context.MODE_PRIVATE)
             val appIdToken = appIdPrefs.getString("|T|$senderId|GCM", null)
             if (!appIdToken.isNullOrEmpty()) {
@@ -145,7 +129,6 @@ class GoogleConstellationClient(private val context: Context) {
                 return Pair(appIdToken, "seeded-from-stock-gms-appid")
             }
 
-            // For Constellation primary sender, also check constellation_prefs.xml gcm_token
             if (senderId == ConstellationConstants.SENDER_CONSTELLATION) {
                 val stockPrefs = context.getSharedPreferences(ConstellationConstants.PREFS_CONSTELLATION, Context.MODE_PRIVATE)
                 val stockGcmToken = stockPrefs.getString("gcm_token", null)
@@ -156,11 +139,9 @@ class GoogleConstellationClient(private val context: Context) {
                 }
             }
 
-            // No preserved token found - register fresh
             Log.i(TAG, "No preserved IID token found for sender $senderId, registering new")
 
             try {
-                // Generate or retrieve Instance ID key pair
                 var instanceId = prefs.getString("instance_id", null)
                 val keyPair: java.security.KeyPair
 
@@ -169,12 +150,10 @@ class GoogleConstellationClient(private val context: Context) {
                     rsaGenerator.initialize(2048)
                     keyPair = rsaGenerator.generateKeyPair()
 
-                    // Calculate Instance ID: SHA1 of public key, modified first byte, base64
                     val digest = MessageDigest.getInstance("SHA1").digest(keyPair.public.encoded)
                     digest[0] = ((112 + (0xF and digest[0].toInt())) and 0xFF).toByte()
                     instanceId = android.util.Base64.encodeToString(digest, 0, 8,
                         android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
-                    // Persist key pair for pub2/sig on future registrations
                     prefs.edit()
                         .putString("instance_id", instanceId)
                         .putString("key_public", android.util.Base64.encodeToString(keyPair.public.encoded, android.util.Base64.NO_WRAP))
@@ -182,7 +161,6 @@ class GoogleConstellationClient(private val context: Context) {
                         .apply()
                     Log.d(TAG, "Generated new Instance ID + key pair: $instanceId")
                 } else {
-                    // Reload persisted key pair
                     val pubBytes = prefs.getString("key_public", null)?.let { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) }
                     val privBytes = prefs.getString("key_private", null)?.let { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) }
                     if (pubBytes != null && privBytes != null) {
@@ -192,14 +170,12 @@ class GoogleConstellationClient(private val context: Context) {
                             kf.generatePrivate(java.security.spec.PKCS8EncodedKeySpec(privBytes))
                         )
                     } else {
-                        // Key pair missing - regenerate
                         Log.w(TAG, "Key pair missing for existing instance ID, regenerating")
                         prefs.edit().remove("instance_id").apply()
                         return getOrRegisterIidToken(context, packageName, senderId)
                     }
                 }
 
-                // Compute pub2 and sig for registration (matches InstanceIdRpc.sendRegisterMessage)
                 val pubKeyBase64 = android.util.Base64.encodeToString(keyPair.public.encoded,
                     android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
                 val signaturePayload = (packageName + "\n" + pubKeyBase64).toByteArray(Charsets.UTF_8)
@@ -211,7 +187,6 @@ class GoogleConstellationClient(private val context: Context) {
 
                 Log.d(TAG, "pub2 length=${pubKeyBase64.length}, sig length=${signatureBase64.length}")
 
-                // Try to get a registration token from Google for this sender ID
                 val checkinInfo = LastCheckinInfo.read(context)
                 if (checkinInfo.androidId != 0L && checkinInfo.securityToken != 0L) {
                     try {
@@ -255,13 +230,11 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.w(TAG, "Device not checked in yet, cannot register FCM token")
                 }
 
-                // Use Instance ID if registration failed
                 Log.d(TAG, "Using Instance ID as fallback: $instanceId")
                 return Pair(instanceId!!, "instance-id")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to get IID token", e)
-                // Final fallback - random ID
                 val randomId = java.util.UUID.randomUUID().toString().take(11).replace("-", "")
                 Log.w(TAG, "Using random ID as last resort: $randomId")
                 return Pair(randomId, "random-fallback")
@@ -283,14 +256,10 @@ class GoogleConstellationClient(private val context: Context) {
         for (account in accounts) {
             val authManager = AuthManager(context, account.name, packageName, GAIA_TOKEN_SCOPE)
             authManager.isGmsApp = true
-            // CRITICAL FIX: Explicitly permit this scope for GMS so token isn't discarded
-            // AuthManager.requestAuth() discards tokens if scope isn't permitted (lines 366-368)
             authManager.setPermitted(true)
             authManager.forceRefreshToken = true  // Skip cache to get fresh token
             val token = authManager.getAuthToken() ?: try {
                 Log.d(TAG, "No cached token, requesting from Google for ${account.name}...")
-                // AuthManager may perform network I/O. On some devices/threads (including Binder threads)
-                // StrictMode can throw NetworkOnMainThreadException. Always run this on Dispatchers.IO.
                 val response = withContext(Dispatchers.IO) {
                     authManager.requestAuthWithBackgroundResolution(false)
                 }
@@ -313,11 +282,6 @@ class GoogleConstellationClient(private val context: Context) {
         return tokens
     }
 
-    /**
-     * Get Gaia IDs (numeric Google account IDs) for all logged-in Google accounts.
-     * These are used in TelephonyInfoContainer (ClientInfo field 20).
-     * Gaia ID format: "116253767460812011076" (numeric string)
-     */
     private fun getGaiaIds(): List<String> {
         val accountManager = AccountManager.get(context)
         val accounts = accountManager.getAccountsByType(AuthConstants.DEFAULT_ACCOUNT_TYPE)
@@ -327,7 +291,6 @@ class GoogleConstellationClient(private val context: Context) {
         }
         val gaiaIds = ArrayList<String>(accounts.size)
         for (account in accounts) {
-            // GoogleUserId is the numeric Gaia ID stored during account login
             val gaiaId = accountManager.getUserData(account, "GoogleUserId")
             if (!gaiaId.isNullOrEmpty()) {
                 gaiaIds.add(gaiaId)
@@ -345,7 +308,6 @@ class GoogleConstellationClient(private val context: Context) {
         Log.i(TAG, "verifyPhoneNumber: phone=$requestedNumber")
 
         return (try {
-            // Get package info for headers
             val packageName = context.packageName
             @Suppress("DEPRECATION")
             val certSha1 = PackageUtils.firstSignatureDigest(context, packageName)
@@ -354,34 +316,23 @@ class GoogleConstellationClient(private val context: Context) {
             runBlocking {
                 var callContext: ConstellationCallContext? = null
                 try {
-                // Get IID token - MUST be registered with Constellation project ID!
-                // Uses shared method that handles caching, registration, and fallbacks
                 val (iidToken, iidSource) = getOrRegisterIidToken(context, packageName, ConstellationConstants.SENDER_CONSTELLATION)
                 Log.d(TAG, "IID token source: $iidSource, token prefix: ${iidToken.take(20)}...")
 
-                // GPNV (PhoneNumber/GetVerifiedPhoneNumbers) uses the read-only IID sender in stock GMS
-                // (icet.e(): IidToken__read_only_project_number = 745476177629).
                 val (readOnlyIidToken, readOnlyIidSource) = getOrRegisterIidToken(context, packageName, ConstellationConstants.SENDER_READ_ONLY)
                 Log.d(TAG, "Read-only IID token source: $readOnlyIidSource, token prefix: ${readOnlyIidToken.take(20)}...")
 
-                // Calculate iidHash for DroidGuard content bindings
-                // GMS bfck.java:24-30: SHA-256 hash, pad to 64 bytes, base64 NO_PADDING|NO_WRAP (NOT URL_SAFE!), truncate to 32 chars
-                // CRITICAL FIX: GMS uses flag 3 = NO_PADDING(1) | NO_WRAP(2), NOT URL_SAFE!
                 val iidHashDigest = MessageDigest.getInstance("SHA-256").digest(iidToken.toByteArray(Charsets.UTF_8))
                 val iidHashPadded = iidHashDigest.copyOf(64)  // Pad to 64 bytes with zeros
                 val iidHashFull = android.util.Base64.encodeToString(iidHashPadded,
                     android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)  // Flag 3 = NO_PADDING | NO_WRAP
                 val iidHash = iidHashFull.substring(0, 32)  // Truncate to 32 chars like GMS
 
-                // Setup gRPC + DG via ConstellationRpcClient
                 val gaiaTokens = getGaiaTokens(packageName)
                 if (gaiaTokens.isNotEmpty()) {
                     Log.i(TAG, "OAuth tokens for proto gaia_ids: ${gaiaTokens.first().take(15)}... (${gaiaTokens.first().length} chars)")
                 }
 
-                // Get real Spatula token from AppCertManager (upstream microG implementation)
-                // Stock GMS: ajom.b("com.google.android.gms") → IAppCertService.getSpatulaHeader()
-                // Returns Base64-encoded protobuf with HMAC, deviceId, keyCert
                 val spatulaHeader = try {
                     Log.d(TAG, "Fetching Spatula header (10s timeout)...")
                     val spatula = runBlocking {
@@ -414,11 +365,9 @@ class GoogleConstellationClient(private val context: Context) {
                 val publicKeyBytes = keyMaterial.publicKeyBytes
                 val privateKey = keyMaterial.privateKey
 
-                // Check if server has acknowledged our public key (GMS bbah.java:1163)
-                // If true, we need to sign requests with client_credentials
                 val isPublicKeyAcked = keyMaterial.isPublicKeyAcked
                 Log.d(TAG, "is_public_key_acked: $isPublicKeyAcked")
-                // 6-8. Gather telephony data and build proto objects
+
                 val targetImsi = request?.imsiRequests?.firstOrNull()?.imsi
                 val targetMsisdn = request?.imsiRequests?.firstOrNull()?.msisdn
                 val td = gatherTelephonyData(context, targetImsi, targetMsisdn)
@@ -436,13 +385,10 @@ class GoogleConstellationClient(private val context: Context) {
                 val telephonyInfo = buildTelephonyInfo(td)
                 Log.d(TAG, "TelephonyInfo: phoneType=${td.phoneTypeInt}, gid1=${td.groupIdLevel1}, simState=${td.simStateEnum}, serviceState=${td.serviceStateEnum}, subs=${td.activeSubCount}/${td.maxSubCount}")
 
-                // Build Sync Request with ALL required fields
                 val sessionId = UUID.randomUUID().toString()
-                // GMS uses "language_country" format explicitly (e.g., "en_US")
                 val localeStr = Locale.getDefault().toString()
                 Log.d(TAG, "Locale: '$localeStr'")
 
-                // gaiaTokens already obtained above (used for proto body gaia_ids in GetConsent)
                 Log.i(TAG, "OAuth tokens for proto body: ${gaiaTokens.size} available, format: ${gaiaTokens.firstOrNull()?.take(10) ?: "none"}...")
 
                 if (gaiaTokens.isEmpty()) {
@@ -450,13 +396,10 @@ class GoogleConstellationClient(private val context: Context) {
                     return@runBlocking Ts43Client.EntitlementResult.error("no-gaia-token")
                 }
 
-                // Field 12 in ClientInfo: repeated StringId (registered_app_ids)
                 val registeredAppIds = gaiaTokens.map { StringId(value_ = it) }
 
-                // SIMAssociation.identifiers (field 2) uses repeated StringId
                 val simAssociationIdentifiers = registeredAppIds
 
-                // Build TelephonyInfoContainer (field 20 of ClientInfo) from Gaia IDs
                 val gaiaIdsList = getGaiaIds()
                 val telephonyInfoContainer = buildTelephonyInfoContainer(gaiaIdsList)
                 Log.d(TAG, "TelephonyInfoContainer: ${gaiaIdsList.size} Gaia IDs")
@@ -474,24 +417,12 @@ class GoogleConstellationClient(private val context: Context) {
                 val msisdn = phoneIdentity.msisdn
                 val phoneNumber = phoneIdentity.phoneNumber
 
-                // Stock GMS V2 (bevr.java:132,142) clones caller extras bundle, adds calling_api.
-                // V1 (bevr.java:259) also adds calling_package, but Messages uses V2.
-                // bevm.k(bundle) converts ALL keys to proto Params.
-                // Messages extras include: policy_id, session_id, required_consumer_consent,
-                // one_time_verification, consent_type.
                 val mergedBundle = if (request?.extras != null) android.os.Bundle(request.extras) else android.os.Bundle()
-                // V2 path (bevr.java:142): stock GMS adds only calling_api, NOT calling_package.
-                // calling_package is only added in V1 path (bevr.java:259). Messages uses V2.
                 mergedBundle.putString("calling_api", "verifyPhoneNumber")
-                // force_provisioning=true tells server the user confirmed their number.
                 if (!phoneNumber.isNullOrEmpty() && !mergedBundle.containsKey("force_provisioning")) {
                     mergedBundle.putString("force_provisioning", "true")
                     Log.i(TAG, "Added force_provisioning=true (MSISDN present, not in extras)")
                 }
-                // Always declare OTP support. Without this, server returns reason=0
-                // (UNKNOWN) instead of reason=5 (PHONE_NUMBER_ENTRY_REQUIRED) or PENDING.
-                // Messages only includes one_time_verification for fresh SIMs, not previously
-                // provisioned ones - but server needs it to guide the OTP flow.
                 val forceOneTimeVerificationSetting = Settings.Global.getString(
                     context.contentResolver,
                     FORCE_ONE_TIME_VERIFICATION_KEY
@@ -514,8 +445,6 @@ class GoogleConstellationClient(private val context: Context) {
                 } else {
                     Log.i(TAG, "Caller already supplied one_time_verification=${mergedBundle.getString("one_time_verification")}")
                 }
-                // Stock GMS does NOT add policy_id as a Param - it goes into
-                // Verification.carrier_info.phone_number (bevm.java:1177).
                 val params = bundleToParams(mergedBundle)
                 Log.d(TAG, "Verification params: ${params.joinToString { "${it.name}=${it.value_}" }}")
 
@@ -529,15 +458,6 @@ class GoogleConstellationClient(private val context: Context) {
                     emptyList()
                 }
 
-                // Messages passes an IdTokenRequest (2 strings) into VerifyPhoneNumberRequest.
-                // Stock GMS threads these through to PhoneNumber/GetVerifiedPhoneNumbers as:
-                //   certificate_hash = idTokenRequest.a
-                //   token_nonce      = idTokenRequest.b
-                // (see GMS bevv.java:286-288 and the hzdo/hzds proto builders).
-                // Messages passes audience (= certificate_hash) + nonce via IdTokenRequest.
-                // From captured JWT: aud = "357317899610-64uqvc4ala96muamloactrflpdcdcere.apps.googleusercontent.com"
-                // Server uses certificate_hash as JWT audience, token_nonce as JWT nonce claim.
-                // Override via: adb shell settings put global microg_constellation_id_token_audience <value>
                 val idTokenCarrierInfo = resolveIdTokenCarrierInfo(
                     request = request,
                     callingPackage = callingPackage,
@@ -561,7 +481,6 @@ class GoogleConstellationClient(private val context: Context) {
                 val deviceAndroidId = deviceIdentity.deviceAndroidId
                 val userAndroidId = deviceIdentity.userAndroidId
 
-                // Common proto context shared across all request builders in this call
                 val protoCtx = RequestProtoContext(
                     iidToken = iidToken,
                     deviceAndroidId = deviceAndroidId,
@@ -576,25 +495,17 @@ class GoogleConstellationClient(private val context: Context) {
                     telephonyInfoContainer = telephonyInfoContainer
                 )
 
-                // Generate Sync-specific DroidGuard token
-                // GMS bewt.java:694 passes lowercase method name as DG rpc binding
-                // Try raw DG first; if PERMISSION_DENIED, retry without DG
                 val syncTokenRaw = rpc.getDroidGuardToken("sync", iidToken)
                 val (cachedArfb, _, _) = rpc.getCachedDroidGuardToken(rpc.resolveDroidGuardFlow("sync"))
                 val syncToken = cachedArfb ?: syncTokenRaw  // Prefer ARfb, fall back to raw DG
                 Log.i(TAG, "Sync DG: using ${if (cachedArfb != null) "cached ARfb" else if (syncToken != null) "raw DG" else "NONE (will retry)"} (${syncToken?.length ?: 0} chars)")
 
-                // Build DeviceId for client_credentials (same as in ClientInfo)
                 val syncDeviceId = DeviceId(
                     iid_token = iidToken,
                     device_android_id = deviceAndroidId,
                     user_android_id = userAndroidId
                 )
 
-                // Create client_credentials (GMS bewt.java h() method, lines 284-315)
-                // Stock GMS only includes credentials when is_public_key_acked=true.
-                // First Sync: no credentials → server acks key → CLIENT_KEY_UPDATED.
-                // Subsequent Syncs: credentials included with ECDSA signature.
                 val syncClientCredentials = createClientCredentials(
                     iidTokenForSig = iidToken,
                     deviceIdForCreds = syncDeviceId,
@@ -605,9 +516,6 @@ class GoogleConstellationClient(private val context: Context) {
                     Log.d(TAG, "Including client_credentials in Sync request (forced)")
                 }
 
-                // VerificationMethodInfo (field 7 of Verification / hyze in GMS)
-                // Stock GMS populates this via SmsManager.createAppSpecificSmsToken() (bfrb.java:66)
-                // for silent SMS verification. The token goes into VerificationMethodData.value (hyzo.b).
                 val smsToken = try {
                     val smsSubId = subscriptionInfo?.subscriptionId ?: -1
                     val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -711,8 +619,6 @@ class GoogleConstellationClient(private val context: Context) {
                     "ConsentFlow outcome: consented=${consentOutcome.consented}, setConsentAttempted=${consentOutcome.setConsentAttempted}, setConsentSucceeded=${consentOutcome.setConsentSucceeded}, arfbCached=${consentOutcome.arfbCached}"
                 )
 
-                // Pre-register SMS receivers BEFORE Sync (race fix: SMS may arrive during RPC).
-                // SMS may arrive during the Sync RPC if server issues PENDING immediately.
                 SmsInbox.prepare(context)
 
                 try {
